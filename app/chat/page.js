@@ -831,11 +831,71 @@ const ChatPage = () => {
     }
   };
 
+  // Add a function to show safety disclaimers
+  const showSafetyDisclaimer = (actionType) => {
+    const hasShownMessageDisclaimer = localStorage.getItem('hasShownMessageDisclaimer');
+    const hasShownVideoDisclaimer = localStorage.getItem('hasShownVideoDisclaimer');
+    
+    if (actionType === 'message' && !hasShownMessageDisclaimer) {
+      toast((t) => (
+        <div className="p-2">
+          <h3 className="font-bold text-red-600 mb-1">⚠️ Safety Alert</h3>
+          <p className="text-sm mb-2">Remember: You are chatting with strangers. For your safety:</p>
+          <ul className="text-xs list-disc pl-4 mb-2">
+            <li>DO NOT share personal information (address, phone, financial details)</li>
+            <li>Be cautious about sharing photos or other identifiable content</li>
+            <li>Report inappropriate behavior immediately</li>
+          </ul>
+          <div className="text-right">
+            <button 
+              onClick={() => {
+                localStorage.setItem('hasShownMessageDisclaimer', 'true');
+                toast.dismiss(t.id);
+              }}
+              className="bg-blue-500 text-white px-2 py-1 rounded text-xs"
+            >
+              I understand
+            </button>
+          </div>
+        </div>
+      ), { duration: 10000 });
+    }
+    
+    if (actionType === 'video' && !hasShownVideoDisclaimer) {
+      toast((t) => (
+        <div className="p-2">
+          <h3 className="font-bold text-red-600 mb-1">⚠️ Video Call Warning</h3>
+          <p className="text-sm mb-2">Before starting a video call with a stranger:</p>
+          <ul className="text-xs list-disc pl-4 mb-2">
+            <li>Be aware of what's visible in your background</li>
+            <li>DO NOT share sensitive personal information</li>
+            <li>Inappropriate behavior may be reported and result in a ban</li>
+            <li>The developer is not responsible for any negative experiences</li>
+          </ul>
+          <div className="text-right">
+            <button 
+              onClick={() => {
+                localStorage.setItem('hasShownVideoDisclaimer', 'true');
+                toast.dismiss(t.id);
+              }}
+              className="bg-blue-500 text-white px-2 py-1 rounded text-xs"
+            >
+              I understand
+            </button>
+          </div>
+        </div>
+      ), { duration: 15000 });
+    }
+  };
+
   // Handle sending messages
   const handleSendMessage = async (e) => {
     e.preventDefault();
     const trimmedMessage = message.trim();
     if ((trimmedMessage === "" && !imageFile) || !selectedUser || !userData) return;
+    
+    // Show safety disclaimer for messaging
+    showSafetyDisclaimer('message');
 
     // Verify user exists in database before sending message
     const userExists = await verifyUserExists();
@@ -1407,12 +1467,33 @@ const ChatPage = () => {
   
   // Start a video call with the selected user
   const startVideoCall = () => {
-    if (selectedUser && selectedUser.online) {
-      console.log("Starting video call with", selectedUser.userName);
-      setShowVideoCall(true);
-    } else {
-      toast.error("User is offline. Video call is not available.");
+    if (!selectedUser?.online) {
+      toast.error("Cannot start a call with offline user!");
+      return;
     }
+    
+    // Show safety disclaimer for video calls
+    showSafetyDisclaimer('video');
+    
+    // Play outgoing call sound
+    const audio = new Audio('/sounds/outgoing-call.mp3');
+    if (notificationSound) {
+      audio.loop = true;
+      audio.play().catch(err => console.error("Error playing sound:", err));
+      // Store audio reference to stop it later
+      ringToneRef.current = audio;
+    }
+    
+    // Notify the server we're calling this user
+    socket.emit('start-call', {
+      from: userData.userName,
+      to: selectedUser.userName,
+      callType: 'video'
+    });
+    
+    // Show outgoing call UI
+    setOutgoingCall(true);
+    setShowVideoCall(true);
   };
   
   // Close the video call UI
@@ -1854,6 +1935,38 @@ const ChatPage = () => {
                 >
                   Female
                 </button>
+              </div>
+            </div>
+            
+            {/* Region Filter */}
+            <div className="flex flex-col mt-4">
+              <label htmlFor="regionFilter" className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
+                Filter By Region
+              </label>
+              <div className="flex space-x-2">
+                <button 
+                  onClick={() => setRegionFilter('all')}
+                  className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
+                    regionFilter === 'all' 
+                      ? 'bg-blue-500 text-white' 
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  All Regions
+                </button>
+                {userData?.region && userData.region !== 'Unknown' && (
+                  <button 
+                    onClick={() => setRegionFilter(userData.region.toLowerCase())}
+                    className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
+                      regionFilter === userData.region.toLowerCase()
+                        ? 'bg-blue-500 text-white' 
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    }`}
+                    title="Filter users from your region"
+                  >
+                    My Region
+                  </button>
+                )}
               </div>
             </div>
           </div>

@@ -23,6 +23,7 @@ export default function LoginPage() {
     const [usernameError, setUsernameError] = useState('');
     const [showLoader, setLoader] = useState(false);
     const [connectionStatus, setConnectionStatus] = useState('checking'); // 'checking', 'connected', 'error'
+    const [termsAccepted, setTermsAccepted] = useState(false);
   
     // Username policy constants
     const MIN_USERNAME_LENGTH = 5;
@@ -260,6 +261,16 @@ export default function LoginPage() {
         return;
       }
 
+      // Validate terms acceptance
+      if (!termsAccepted) {
+        toast.error("You must accept the terms and policies to continue");
+        return;
+      }
+
+      // Country and region are optional but will default to 'Unknown' if not provided
+      const country = formData.country.trim() || 'Unknown';
+      const region = formData.region.trim() || 'Unknown';
+
       // Show loader and attempt connection
       setLoader(true);
       
@@ -286,8 +297,8 @@ export default function LoginPage() {
         ...formData,
         userName: formData.userName.trim(),
         Age: Number(formData.Age),
-        country: formData.country.trim() || 'Unknown',
-        region: formData.region.trim() || 'Unknown',
+        country: country,
+        region: region,
         online: true,
         lastSeen: new Date().toISOString()
       };
@@ -654,14 +665,41 @@ export default function LoginPage() {
               </div>
             </div>
 
+            {/* Terms and Conditions */}
+            <div className="mt-6 p-4 bg-gray-50 rounded-xl border border-gray-200 text-sm text-gray-700">
+              <h3 className="font-bold text-gray-900 mb-2">Terms & Policies</h3>
+              <div className="max-h-60 overflow-y-auto mb-4 text-xs space-y-2">
+                <p><span className="font-semibold">Age Restriction:</span> This platform is strictly for users 18 years and older. By continuing, you confirm you are at least 18 years old.</p>
+                <p><span className="font-semibold">Safety Warning:</span> You will be interacting with strangers online. Exercise caution and never share personal information (address, phone number, financial details).</p>
+                <p><span className="font-semibold">Content Policy:</span> Inappropriate content, harassment, or illegal activities are strictly prohibited and may result in immediate termination of your account.</p>
+                <p><span className="font-semibold">Privacy:</span> Your conversations are not encrypted end-to-end. Do not share sensitive information that you wouldn't want others to potentially access.</p>
+                <p><span className="font-semibold">User Responsibility:</span> You are solely responsible for your interactions and any consequences that may arise from them.</p>
+                <p><span className="font-semibold">Disclaimer of Liability:</span> The developers and operators of this platform are not responsible for any damages, losses, or harm resulting from your use of this service or interactions with other users.</p>
+                <p><span className="font-semibold">Data Collection:</span> We collect basic information including location data to improve user experience. By using this service, you consent to this data collection.</p>
+              </div>
+              <div className="flex items-start gap-2">
+                <input 
+                  type="checkbox" 
+                  id="termsAccept" 
+                  checked={termsAccepted}
+                  onChange={(e) => setTermsAccepted(e.target.checked)}
+                  className="mt-1"
+                  required
+                />
+                <label htmlFor="termsAccept" className="text-xs">
+                  I am at least 18 years old and I accept all terms, conditions, and policies. I understand I am responsible for my actions and interactions on this platform.
+                </label>
+              </div>
+            </div>
+
             <button
               type="submit"
               className={`w-full py-3.5 md:py-4 px-6 rounded-xl focus:outline-none focus:ring-2 focus:ring-offset-2 transform transition-all duration-200 hover:scale-[1.02] active:scale-[0.98] font-semibold text-white shadow-lg ${
-                usernameError || connectionStatus !== 'connected'
+                usernameError || connectionStatus !== 'connected' || !termsAccepted
                   ? 'bg-gray-300 cursor-not-allowed' 
                   : 'bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 focus:ring-blue-500 shadow-blue-500/20'
               }`}
-              disabled={!!usernameError || connectionStatus !== 'connected'}
+              disabled={!!usernameError || connectionStatus !== 'connected' || !termsAccepted}
             >
               Get Started
             </button>
