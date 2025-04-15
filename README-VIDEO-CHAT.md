@@ -64,4 +64,5 @@ The video chat feature uses WebRTC (Web Real-Time Communication) technology to e
 
 ## Privacy Note
 
-All video and audio is transmitted directly between users and is not stored on any server. The server only helps establish the initial connection but does not have access to the call content. 
+All video and audio is transmitted directly between users and is not stored on any server. The server only helps establish the initial connection but does not have access to the call content.
+hey 
