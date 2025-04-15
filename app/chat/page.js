@@ -18,6 +18,7 @@ const ChatPage = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [genderFilter, setGenderFilter] = useState('all');
   const [regionFilter, setRegionFilter] = useState('all'); // Add state for region filter
+  const [blurredImages, setBlurredImages] = useState({}); // Track which images should be blurred
   
   // Add new state variables for emoji picker and image upload
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -462,6 +463,36 @@ const ChatPage = () => {
         return;
       }
       
+      // Check if this is an image message, and show policy notification
+      if (messageData.imageUrl) {
+        // Set the image to be blurred by default
+        setBlurredImages(prev => ({
+          ...prev,
+          [messageData.id]: true
+        }));
+        
+        toast((t) => (
+          <div className="p-3 bg-gray-100 border-l-4 border-red-500 mb-2">
+            <h3 className="font-bold text-red-600 mb-1">⚠️ Image Safety Notice</h3>
+            <p className="text-sm mb-2">You received an image from <span className="font-semibold">{messageData.user}</span>:</p>
+            <ul className="text-xs list-disc pl-4 mb-2">
+              <li className="font-semibold">DO NOT view if you suspect explicit content</li>
+              <li>This platform is NOT responsible for the content of images</li>
+              <li>Exercise caution when viewing images from strangers</li>
+              <li>Report inappropriate content immediately</li>
+            </ul>
+            <div className="flex justify-end gap-2 mt-2">
+              <button 
+                onClick={() => toast.dismiss(t.id)}
+                className="bg-blue-500 text-white px-2 py-1 rounded text-xs"
+              >
+                I understand
+              </button>
+            </div>
+          </div>
+        ), { duration: 8000 });
+      }
+      
       // Optimize state updates for better performance
       requestAnimationFrame(() => {
         // Update the user in our list who sent this message
@@ -843,7 +874,9 @@ const ChatPage = () => {
           <p className="text-sm mb-2">Remember: You are chatting with strangers. For your safety:</p>
           <ul className="text-xs list-disc pl-4 mb-2">
             <li>DO NOT share personal information (address, phone, financial details)</li>
-            <li>Be cautious about sharing photos or other identifiable content</li>
+            <li className="font-semibold">DO NOT share personal photos or explicit images</li>
+            <li>The platform is NOT responsible for any shared content</li>
+            <li>Images shared cannot be fully deleted once sent</li>
             <li>Report inappropriate behavior immediately</li>
           </ul>
           <div className="text-right">
@@ -987,6 +1020,37 @@ const ChatPage = () => {
     
     // Upload image if exists
     if (imageFile) {
+      // Show a specific warning for image sharing
+      toast((t) => (
+        <div className="p-3 bg-yellow-50 border-l-4 border-yellow-500">
+          <h3 className="font-bold text-red-600 mb-1">⚠️ Important Image Notice</h3>
+          <p className="text-sm mb-2">You are about to share an image:</p>
+          <ul className="text-xs list-disc pl-4 mb-2">
+            <li className="font-bold text-red-600">DO NOT share personal photos or explicit content</li>
+            <li>The platform is NOT responsible for any consequences of sharing inappropriate content</li>
+            <li>Images are stored on servers and cannot be fully deleted</li>
+            <li>Other users may download or screenshot your images</li>
+          </ul>
+          <div className="flex justify-end gap-2 mt-2">
+            <button 
+              onClick={() => {
+                setImageFile(null);
+                toast.dismiss(t.id);
+              }}
+              className="bg-gray-200 text-gray-800 px-2 py-1 rounded text-xs"
+            >
+              Cancel
+            </button>
+            <button 
+              onClick={() => toast.dismiss(t.id)}
+              className="bg-blue-500 text-white px-2 py-1 rounded text-xs"
+            >
+              Proceed Anyway
+            </button>
+          </div>
+        </div>
+      ), { duration: 7000 });
+      
       setIsUploading(true);
       try {
         // Create a FormData object to send the file
@@ -1203,13 +1267,50 @@ const ChatPage = () => {
             <p className="text-sm">{msg.message}</p>
             {msg.imageUrl && (
               <div className="mt-2 mb-2">
-                <img 
-                  src={msg.imageUrl} 
-                  alt="Shared image" 
-                  className="rounded-lg max-w-full max-h-60 object-contain cursor-pointer"
-                  onClick={() => window.open(msg.imageUrl, '_blank')}
-                  loading="lazy" // Add lazy loading for images
-                />
+                {!isMe && (
+                  <div className="bg-gray-100 p-2 rounded-t-lg border-l-4 border-red-500 text-xs mb-1">
+                    <div className="flex items-center">
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-red-500 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                      </svg>
+                      <p className="font-bold text-red-600">Image Safety Notice</p>
+                    </div>
+                    <p>This platform is not responsible for image content.</p>
+                    <p className="font-semibold">Do not view if it may be personal or explicit content.</p>
+                  </div>
+                )}
+                {(!isMe && blurredImages[msg.id]) ? (
+                  <div className="relative">
+                    <div className="absolute inset-0 bg-gray-200 backdrop-blur-xl flex flex-col items-center justify-center z-10 rounded-lg">
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 text-gray-500 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                      </svg>
+                      <p className="text-gray-600 text-sm font-medium mb-2">Image is hidden for safety</p>
+                      <button 
+                        onClick={() => setBlurredImages(prev => ({...prev, [msg.id]: false}))}
+                        className="bg-blue-500 text-white px-3 py-1 rounded text-sm hover:bg-blue-600"
+                      >
+                        View Image
+                      </button>
+                      <p className="text-xs text-gray-500 mt-2 px-4 text-center">
+                        By viewing this image, you acknowledge that the platform is not responsible for its content
+                      </p>
+                    </div>
+                    <img 
+                      src={msg.imageUrl} 
+                      alt="Shared image (hidden)" 
+                      className="rounded-lg max-w-full max-h-60 object-contain invisible"
+                    />
+                  </div>
+                ) : (
+                  <img 
+                    src={msg.imageUrl} 
+                    alt="Shared image" 
+                    className="rounded-lg max-w-full max-h-60 object-contain cursor-pointer"
+                    onClick={() => window.open(msg.imageUrl, '_blank')}
+                    loading="lazy" // Add lazy loading for images
+                  />
+                )}
               </div>
             )}
             <div className="flex items-center justify-end mt-1 space-x-1">
@@ -1278,6 +1379,34 @@ const ChatPage = () => {
     
     const maxSizeInMB = 5;
     const maxSizeInBytes = maxSizeInMB * 1024 * 1024;
+    
+    // Display image sharing safety warning
+    const hasShownImageWarning = localStorage.getItem('hasShownImageWarning');
+    if (!hasShownImageWarning) {
+      toast((t) => (
+        <div className="p-2">
+          <h3 className="font-bold text-red-600 mb-1">⚠️ Image Sharing Warning</h3>
+          <p className="text-sm mb-2">Before sharing images, please note:</p>
+          <ul className="text-xs list-disc pl-4 mb-2">
+            <li className="font-semibold">DO NOT share personal or explicit images</li>
+            <li>Images are not encrypted and may be viewed by others</li>
+            <li>This platform is NOT responsible for content shared by users</li>
+            <li>Sharing inappropriate content may result in account termination</li>
+          </ul>
+          <div className="text-right">
+            <button 
+              onClick={() => {
+                localStorage.setItem('hasShownImageWarning', 'true');
+                toast.dismiss(t.id);
+              }}
+              className="bg-blue-500 text-white px-2 py-1 rounded text-xs"
+            >
+              I understand
+            </button>
+          </div>
+        </div>
+      ), { duration: 10000 });
+    }
     
     // Check file type and size
     if (file.type.startsWith('image/')) {
