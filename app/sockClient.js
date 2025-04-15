@@ -30,7 +30,11 @@ export const initializeSocket = (userName) => {
     reconnectionDelayMax: 5000,
     timeout: 20000,
     autoConnect: true,
-    query: { userName }
+    query: { userName },
+    auth: {
+      userName,
+      token: `user-${userName}-${Date.now()}` // Simple token for authentication
+    }
   });
   
   // Connection event handlers

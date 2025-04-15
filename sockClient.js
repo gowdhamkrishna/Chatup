@@ -21,7 +21,7 @@ const getServerUrl = () => {
 const getCurrentUser = () => {
   if (typeof window === 'undefined') return null;
   try {
-    const userData = localStorage.getItem('userData');
+    const userData = localStorage.getItem('guestSession');
     if (userData) {
       const parsed = JSON.parse(userData);
       return parsed?.userName || null;
@@ -49,6 +49,16 @@ const logMessage = (type, message, data) => {
   }
 };
 
+// Heartbeat system to track user activity and maintain session
+let lastActiveTimestamp = Date.now();
+let heartbeatInterval = null;
+const SESSION_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+
+const updateActivityTimestamp = () => {
+  lastActiveTimestamp = Date.now();
+  localStorage.setItem('lastActive', lastActiveTimestamp.toString());
+};
+
 // Create socket instance with optimized settings
 const createSocket = () => {
   const socket = io(getServerUrl(), {
@@ -62,7 +72,8 @@ const createSocket = () => {
     forceNew: false, // Reuse existing connection
     // Include username in handshake query if available
     query: {
-      userName: getCurrentUser()
+      userName: getCurrentUser(),
+      lastActive: lastActiveTimestamp
     }
   });
   
@@ -80,6 +91,25 @@ let reconnectTimer = null;
 // Log the connection URL once
 if (typeof window !== 'undefined') {
   logMessage('info', `Socket connecting to: ${getServerUrl()} as ${getCurrentUser() || 'anonymous'}`);
+  
+  // Set up activity listeners to track user interaction
+  const activityEvents = ['mousedown', 'mousemove', 'keydown', 'scroll', 'touchstart', 'click'];
+  activityEvents.forEach(event => {
+    window.addEventListener(event, updateActivityTimestamp, { passive: true });
+  });
+  
+  // Restore last active time from storage if available
+  try {
+    const storedLastActive = localStorage.getItem('lastActive');
+    if (storedLastActive) {
+      const parsedTime = parseInt(storedLastActive, 10);
+      if (!isNaN(parsedTime) && Date.now() - parsedTime < SESSION_TIMEOUT) {
+        lastActiveTimestamp = parsedTime;
+      }
+    }
+  } catch (e) {
+    console.error("Error restoring activity timestamp:", e);
+  }
 }
 
 socket.on('connect', () => {
@@ -99,10 +129,34 @@ socket.on('connect', () => {
   // Update query with current username if needed
   const currentUser = getCurrentUser();
   if (currentUser && (!socket.io.opts.query || socket.io.opts.query.userName !== currentUser)) {
-    socket.io.opts.query = { ...socket.io.opts.query, userName: currentUser };
+    socket.io.opts.query = { 
+      ...socket.io.opts.query, 
+      userName: currentUser,
+      lastActive: lastActiveTimestamp 
+    };
     
     // Let the server know we're online
     socket.emit('user-online', currentUser);
+    
+    // Set up heartbeat system for session persistence
+    if (typeof window !== 'undefined') {
+      if (heartbeatInterval) {
+        clearInterval(heartbeatInterval);
+      }
+      
+      heartbeatInterval = setInterval(() => {
+        const now = Date.now();
+        const timeSinceLastActive = now - lastActiveTimestamp;
+        
+        // Only send heartbeat if user has been active recently
+        if (timeSinceLastActive < SESSION_TIMEOUT) {
+          socket.emit('heartbeat', {
+            userName: currentUser,
+            lastActive: lastActiveTimestamp
+          });
+        }
+      }, 15000); // Send heartbeat every 15 seconds
+    }
   }
   
   // Set up regular pinging to maintain connection
@@ -112,14 +166,52 @@ socket.on('connect', () => {
       clearInterval(window.socketPingInterval);
     }
     
-    // Set up new ping interval
+    // Set up new ping interval with adaptive timing
     window.socketPingInterval = setInterval(() => {
       if (socket.connected && currentUser) {
-        socket.emit('ping-user', currentUser);
+        const now = Date.now();
+        const timeSinceLastActive = now - lastActiveTimestamp;
+        
+        // If user is active, ping more frequently
+        if (timeSinceLastActive < 5 * 60 * 1000) {  // Active within 5 minutes
+          socket.emit('ping-user', currentUser);
+        } else if (timeSinceLastActive < SESSION_TIMEOUT) {
+          // Less frequent pings for inactive but still in session
+          if (Math.random() < 0.5) { // 50% chance to ping to reduce server load
+            socket.emit('ping-user', currentUser);
+          }
+        }
       }
-    }, 30000); // Ping every 30 seconds
+    }, isMobileDevice() ? 45000 : 30000); // Ping less frequently on mobile to save battery
   }
 });
+
+// Send offline status when the page unloads
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => {
+    const currentUser = getCurrentUser();
+    if (currentUser && socket.connected) {
+      // Use sync XHR for better reliability during page unload
+      try {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `${getServerUrl()}/api/user-offline`, false); // Synchronous request
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.send(JSON.stringify({
+          userName: currentUser,
+          timestamp: new Date().toISOString()
+        }));
+      } catch (e) {
+        // Ignore errors during unload
+      }
+      
+      // Also try the socket method as a backup
+      socket.emit('user-offline', {
+        userName: currentUser,
+        timestamp: new Date().toISOString()
+      });
+    }
+  });
+}
 
 socket.on('connect_error', (error) => {
   if (!isReconnecting) {
@@ -142,12 +234,22 @@ socket.on('connect_error', (error) => {
 socket.on('disconnect', (reason) => {
   logMessage('warn', `Disconnected: ${reason}`);
   
+  // Clean up heartbeat interval
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+    heartbeatInterval = null;
+  }
+  
   if (reason === 'io server disconnect') {
     // Server intentionally disconnected us, wait and reconnect
     reconnectTimer = setTimeout(() => {
       const currentUser = getCurrentUser();
       if (currentUser) {
-        socket.io.opts.query = { ...socket.io.opts.query, userName: currentUser };
+        socket.io.opts.query = { 
+          ...socket.io.opts.query, 
+          userName: currentUser,
+          lastActive: lastActiveTimestamp 
+        };
       }
       socket.connect();
     }, 3000);
@@ -159,12 +261,34 @@ socket.on('disconnect', (reason) => {
   }
 });
 
+// Server-initiated session expiration
+socket.on('session-expired', () => {
+  logMessage('warn', 'Session expired by server');
+  // Clear session data
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem('lastActive');
+    // Don't clear the entire guestSession, let the app handle that
+    
+    // Redirect to login if needed
+    if (window.location.pathname !== '/') {
+      window.location.href = '/';
+    }
+  }
+});
+
 // Custom function to force reconnect and update user status
 const forceReconnect = () => {
+  const now = Date.now();
+  updateActivityTimestamp(); // Update activity timestamp
+  
   if (socket.disconnected) {
     const currentUser = getCurrentUser();
     if (currentUser) {
-      socket.io.opts.query = { ...socket.io.opts.query, userName: currentUser };
+      socket.io.opts.query = { 
+        ...socket.io.opts.query, 
+        userName: currentUser,
+        lastActive: lastActiveTimestamp
+      };
     }
     socket.connect();
   } else if (socket.connected) {
@@ -172,6 +296,10 @@ const forceReconnect = () => {
     const currentUser = getCurrentUser();
     if (currentUser) {
       socket.emit('user-online', currentUser);
+      socket.emit('heartbeat', {
+        userName: currentUser,
+        lastActive: lastActiveTimestamp
+      });
     }
   }
 };
@@ -179,6 +307,7 @@ const forceReconnect = () => {
 // Detect if user regains focus/comes back online at the browser level
 if (typeof window !== 'undefined') {
   window.addEventListener('focus', () => {
+    updateActivityTimestamp();
     const currentUser = getCurrentUser();
     if (currentUser && socket.connected) {
       socket.emit('user-online', currentUser);
@@ -188,19 +317,34 @@ if (typeof window !== 'undefined') {
   });
   
   window.addEventListener('online', () => {
+    updateActivityTimestamp();
     forceReconnect();
+  });
+  
+  // Also handle visibility change for modern browsers
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      updateActivityTimestamp();
+      forceReconnect();
+    }
   });
 }
 
 // Update the socket query if the user logs in after socket creation
 export const updateSocketUser = (userName) => {
   if (socket && socket.io && socket.io.opts && socket.io.opts.query) {
+    updateActivityTimestamp();
     socket.io.opts.query.userName = userName;
+    socket.io.opts.query.lastActive = lastActiveTimestamp;
     logMessage('info', `Updated socket user to: ${userName}`);
     
     // If already connected, notify the server about the user change
     if (socket.connected) {
       socket.emit('user-online', userName);
+      socket.emit('heartbeat', {
+        userName: userName,
+        lastActive: lastActiveTimestamp
+      });
     } else {
       // Not connected, try to reconnect
       socket.connect();
@@ -209,5 +353,5 @@ export const updateSocketUser = (userName) => {
 };
 
 // Export the socket instance, update function, and force reconnect
-export { forceReconnect };
+export { forceReconnect, updateActivityTimestamp };
 export default socket;

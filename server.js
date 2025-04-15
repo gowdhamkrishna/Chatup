@@ -145,6 +145,58 @@ app.post('/upload', upload.single('image'), (req, res) => {
   }
 });
 
+// Check if user exists in database
+app.get('/check-user', async (req, res) => {
+  try {
+    const { userName } = req.query;
+    if (!userName) {
+      return res.status(400).json({ error: 'Username is required' });
+    }
+    
+    const exists = await checkUser({ userName });
+    return res.status(200).json({ exists });
+  } catch (error) {
+    console.error('Error checking user:', error);
+    return res.status(500).json({ error: 'Error checking user existence' });
+  }
+});
+
+// Recreate user in database
+app.post('/recreate-user', async (req, res) => {
+  try {
+    const userData = req.body;
+    if (!userData || !userData.userName) {
+      return res.status(400).json({ error: 'Invalid user data' });
+    }
+    
+    // Check if user already exists to avoid duplicates
+    const exists = await checkUser({ userName: userData.userName });
+    if (exists) {
+      return res.status(200).json({ success: true, message: 'User already exists' });
+    }
+    
+    // Recreate the user in the database
+    const newUser = await saveUser({
+      ...userData,
+      lastSeen: new Date(), // Update the last seen timestamp
+    });
+    
+    console.log(`User recreated: ${userData.userName}`);
+    
+    // Notify other clients that this user is back online
+    io.emit('user-online', { userName: userData.userName });
+    
+    return res.status(201).json({ 
+      success: true, 
+      message: 'User recreated successfully',
+      user: newUser
+    });
+  } catch (error) {
+    console.error('Error recreating user:', error);
+    return res.status(500).json({ error: 'Error recreating user' });
+  }
+});
+
 const io = new Server(server, {
   cors: {
     origin: ["*", "http://localhost:3000", "capacitor://localhost", "ionic://localhost", "null"],
@@ -250,23 +302,112 @@ const createThrottledBroadcast = () => {
 
 const throttledBroadcast = createThrottledBroadcast();
 
+// Track user session timeouts to cleanup inactive sessions
+const userSessions = new Map();
+const SESSION_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+
+// Create a function to periodically clean up inactive sessions
+const cleanupInactiveSessions = async () => {
+  const now = Date.now();
+  const inactive = [];
+  
+  userSessions.forEach((lastActive, userName) => {
+    if (now - lastActive > SESSION_TIMEOUT) {
+      inactive.push(userName);
+    }
+  });
+  
+  // Process inactive users
+  for (const userName of inactive) {
+    try {
+      console.log(`Auto-expiring inactive session for ${userName}`);
+      
+      // Update user in database
+      await User.findOneAndUpdate(
+        { userName },
+        { 
+          online: false, 
+          lastSeen: new Date()
+        }
+      );
+      
+      // Notify other users
+      io.emit('user-offline', {
+        userName,
+        lastSeen: new Date().toISOString()
+      });
+      
+      // Remove from tracking maps
+      userSessions.delete(userName);
+      activeUsers.delete(userName);
+      
+      // If socket exists, notify them and disconnect
+      const socketId = activeUsers.get(userName);
+      if (socketId) {
+        const socket = io.sockets.sockets.get(socketId);
+        if (socket) {
+          socket.emit('session-expired');
+          socket.disconnect();
+        }
+      }
+    } catch (error) {
+      console.error(`Error cleaning up session for ${userName}:`, error);
+    }
+  }
+};
+
+// Run cleanup every 5 minutes
+setInterval(cleanupInactiveSessions, 5 * 60 * 1000);
+
 io.on('connection', (socket) => {
   // Implement connection throttling
-  const clientIp = socket.handshake.address;
+  const clientIp = socket.handshake.headers['x-forwarded-for'] || 
+                  socket.handshake.address || 
+                  'unknown';
+                  
+  // Check if this IP is connecting too frequently
   const now = Date.now();
-  const lastConnection = connectionTimestamps.get(clientIp) || 0;
+  const lastConnectTime = connectionTimestamps.get(clientIp) || 0;
   
-  if (now - lastConnection < connectionLimits.connectionThrottleMs) {
-    console.log(`Connection throttled from ${clientIp}`);
-    socket.emit('connectionError', { message: 'Too many connection attempts, please try again later' });
+  if (now - lastConnectTime < connectionLimits.connectionThrottleMs) {
+    console.log(`Connection throttled for IP ${clientIp}`);
+    socket.emit('error', { message: 'Please wait before reconnecting' });
     socket.disconnect();
     return;
   }
   
+  // Update connection timestamp for this IP
   connectionTimestamps.set(clientIp, now);
-  console.log('User connected:', socket.id);
-  performanceStats.connections++;
-
+  
+  console.log(`New socket connection: ${socket.id} from ${clientIp}`);
+  
+  // Check if user session/token is provided right at connection
+  const { userName, token } = socket.handshake.auth;
+  
+  if (userName && token) {
+    // Verify token validity (simplified, should use proper verification)
+    if (token.includes(userName)) {
+      (async () => {
+        try {
+          // Check if user exists in database
+          const exists = await checkUser({ userName });
+          
+          if (!exists) {
+            console.log(`Reconnecting user ${userName} doesn't exist in database, will wait for user-reconnect event`);
+            // We'll wait for the user-reconnect event with full userData
+          } else {
+            console.log(`Authenticated connection for existing user: ${userName}`);
+            socket.userName = userName;
+            activeUsers.set(userName, socket.id);
+            await updateLastSeen(userName);
+          }
+        } catch (error) {
+          console.error(`Error checking user at connection: ${error}`);
+        }
+      })();
+    }
+  }
+  
   socket.on('connected', async (formData) => {
     try {
       if (!formData?.userName) {
@@ -371,53 +512,58 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('ping-user', async (userName) => {
-    if (!userName) return;
-    
-    // Don't log each ping to reduce noise
-    // console.log(`Ping from user: ${userName}`);
-    
+  socket.on('user-online', async (userName) => {
     try {
-      // Check if this is the correct socket for this user
-      const activeUser = activeUsers.get(userName);
-      if (activeUser && activeUser.socketId !== socket.id) {
-        // This is a new socket for this user, update it
-        console.log(`User ${userName} has a new socket, updating from ${activeUser.socketId} to ${socket.id}`);
+      if (!userName) return;
+      
+      // Check if user exists in database
+      const userExists = await checkUser({ userName });
+      
+      if (!userExists) {
+        console.log(`User ${userName} not found in database during user-online event`);
+        // Notify client that user doesn't exist
+        socket.emit('user-not-found', { userName });
+        return;
       }
       
-      const now = new Date();
-      // Update less frequently (only if more than 2 minutes have passed)
-      if (!activeUser || !activeUser.lastSeen || now - new Date(activeUser.lastSeen) > 120000) {
-        await User.findOneAndUpdate(
-          { userName },
-          { 
-            online: true, 
-            lastSeen: now,
-            socketId: socket.id 
-          },
-          { new: true }
-        );
-        
-        // Add/update in active users map
-        activeUsers.set(userName, { 
-          socketId: socket.id, 
-          online: true,
-          lastSeen: now 
-        });
-        
-        // Emit online status update more selectively
-        io.emit('user-online', {
-          userName,
-          online: true,
-          lastSeen: now
-        });
-      } else {
-        // Just update the active users map without DB update or broadcast
-        activeUsers.set(userName, { 
-          socketId: socket.id, 
-          online: true,
-          lastSeen: now 
-        });
+      // Update user in database
+      socket.userName = userName;
+      activeUsers.set(userName, socket.id);
+      performanceStats.connections++;
+      
+      // Update last seen timestamp
+      await updateLastSeen(userName);
+      
+      // Broadcast to all users
+      io.emit('user-online', { userName });
+      
+      // Log connection
+      console.log(`User Online: ${userName} (Socket ID: ${socket.id})`);
+    } catch (error) {
+      console.error(`Error handling user-online for ${userName}:`, error);
+      performanceStats.errors++;
+    }
+  });
+
+  socket.on('ping-user', async (userName) => {
+    try {
+      if (!userName) return;
+      
+      // Check if user exists in database first
+      const userExists = await checkUser({ userName });
+      
+      if (!userExists) {
+        console.log(`User ${userName} not found in database during ping-user event`);
+        // Notify client that user doesn't exist
+        socket.emit('user-not-found', { userName });
+        return;
+      }
+      
+      await updateLastSeen(userName);
+      
+      // Update active users map
+      if (!activeUsers.has(userName)) {
+        activeUsers.set(userName, socket.id);
       }
     } catch (error) {
       console.error(`Error handling ping for ${userName}:`, error);
@@ -677,360 +823,283 @@ io.on('connection', (socket) => {
     }
   });
  
-  socket.on('disconnect', async () => {
-    console.log(`Socket disconnected: ${socket.id}`);
-    
+  socket.on('disconnect', async (reason) => {
     try {
-      // Find the username associated with this socket
-      let userNameToUpdate = null;
+      console.log(`Socket disconnected: ${socket.id}, reason: ${reason}`);
+      performanceStats.disconnections++;
       
-      for (const [userName, userData] of activeUsers.entries()) {
-        if (userData.socketId === socket.id) {
-          userNameToUpdate = userName;
-          break;
+      // Find the username for this socket
+      let disconnectedUser = null;
+      activeUsers.forEach((socketId, userName) => {
+        if (socketId === socket.id) {
+          disconnectedUser = userName;
+        }
+      });
+      
+      if (disconnectedUser) {
+        console.log(`User disconnected: ${disconnectedUser}`);
+        
+        // Don't immediately mark as offline - wait for reconnect opportunity
+        if (reason === 'transport close' || reason === 'ping timeout') {
+          // These are likely temporary disconnects, wait 10 seconds before marking offline
+          setTimeout(async () => {
+            try {
+              // Check if user reconnected during grace period
+              const currentSocketId = activeUsers.get(disconnectedUser);
+              if (currentSocketId !== socket.id) {
+                console.log(`User ${disconnectedUser} reconnected with new socket, not marking offline`);
+                return;
+              }
+              
+              // Get last active timestamp
+              const lastActive = userSessions.get(disconnectedUser) || 0;
+              const now = Date.now();
+              
+              // If user has been active recently (within 1 minute), keep them as online but update last seen
+              if (now - lastActive < 60000) {
+                console.log(`User ${disconnectedUser} was active recently, keeping as online`);
+                return;
+              }
+              
+              // Mark as offline after grace period if no reconnect
+              const user = await User.findOneAndUpdate(
+                { userName: disconnectedUser },
+                { online: false, lastSeen: new Date() },
+                { new: true }
+              );
+              
+              if (user) {
+                // Remove from active users
+                activeUsers.delete(disconnectedUser);
+                
+                // Broadcast offline status to all clients
+                io.emit('user-offline', {
+                  userName: disconnectedUser,
+                  lastSeen: new Date().toISOString()
+                });
+                
+                // Update user list for all clients
+                throttledBroadcast.scheduleUserUpdate(disconnectedUser);
+              }
+            } catch (error) {
+              console.error(`Error handling delayed disconnect for ${disconnectedUser}:`, error);
+            }
+          }, 10000); // 10 second grace period
+        } else if (reason === 'client namespace disconnect' || reason === 'server namespace disconnect') {
+          // Intentional disconnects should be marked offline immediately
+          try {
+            await User.findOneAndUpdate(
+              { userName: disconnectedUser },
+              { online: false, lastSeen: new Date() },
+              { new: true }
+            );
+            
+            // Remove from active users
+            activeUsers.delete(disconnectedUser);
+            
+            // Broadcast offline status
+            io.emit('user-offline', {
+              userName: disconnectedUser,
+              lastSeen: new Date().toISOString()
+            });
+            
+            // Update user list
+            throttledBroadcast.scheduleUserUpdate(disconnectedUser);
+          } catch (error) {
+            console.error(`Error handling disconnect for ${disconnectedUser}:`, error);
+          }
         }
       }
-      
-      if (userNameToUpdate) {
-        console.log(`User ${userNameToUpdate} disconnected`);
-        
-        const now = new Date();
-        // Update the user's status in the database
-        await User.findOneAndUpdate(
-          { userName: userNameToUpdate },
-          { 
-            online: false, 
-            lastSeen: now
-          }
-        );
-        
-        // Update the active users map
-        activeUsers.set(userNameToUpdate, {
-          socketId: null,
-          online: false,
-          lastSeen: now
-        });
-        
-        // Notify all clients immediately
-        io.emit('user-offline', {
-          userName: userNameToUpdate,
-          online: false,
-          lastSeen: now
-        });
-      }
-      
-      cleanupListeners();
     } catch (error) {
-      console.error('Error handling disconnect:', error);
+      console.error('Error in disconnect handler:', error);
     }
   });
 
-  // Handle socket events
-  socket.on('user-online', async (userName) => {
-    if (!userName) {
-      console.log('No username provided for user-online event');
-      return;
-    }
-    console.log(`User online: ${userName}`);
-    
-    // Update the user status in the database
+  // Handle user explicitly going offline
+  socket.on('user-offline', async (data) => {
     try {
-      const now = new Date();
-      const user = await User.findOneAndUpdate(
-        { userName },
+      if (!data || !data.userName) return;
+      
+      console.log(`User explicitly went offline: ${data.userName}`);
+      
+      // Update user in database
+      await User.findOneAndUpdate(
+        { userName: data.userName },
         { 
-          online: true, 
-          lastSeen: now,
-          socketId: socket.id 
+          online: false, 
+          lastSeen: new Date() 
         },
         { new: true }
       );
       
-      if (user) {
-        console.log(`Updated ${userName} as online in DB`);
-        // Add to active users map
-        activeUsers.set(userName, { 
-          socketId: socket.id, 
-          online: true,
-          lastSeen: now 
-        });
-        
-        // Broadcast to all clients
-        io.emit('user-online', {
-          userName,
-          online: true,
-          lastSeen: now
-        });
-      } else {
-        console.log(`User ${userName} not found in database`);
-      }
+      // Remove from active users
+      activeUsers.delete(data.userName);
+      
+      // Broadcast offline status
+      io.emit('user-offline', {
+        userName: data.userName,
+        lastSeen: data.timestamp || new Date().toISOString()
+      });
+      
+      // Update user list
+      throttledBroadcast.scheduleUserUpdate(data.userName);
     } catch (error) {
-      console.error(`Error updating user online status for ${userName}:`, error);
+      console.error('Error handling user-offline:', error);
     }
   });
 
-  // Video call event handling
-  socket.on('call-user', async (data) => {
+  // Handle heartbeat message
+  socket.on('heartbeat', async (data) => {
+    if (!data || !data.userName) return;
+    
     try {
-      if (!data || !data.from || !data.to) {
-        console.log('Invalid call data:', data);
-        return;
+      // Update last active timestamp
+      userSessions.set(data.userName, data.lastActive || Date.now());
+      
+      // Update socket ID mapping
+      activeUsers.set(data.userName, socket.id);
+      
+      // Update database less frequently (every 5th heartbeat) to reduce DB load
+      if (Math.random() < 0.2) {
+        await User.findOneAndUpdate(
+          { userName: data.userName },
+          { 
+            socketId: socket.id, 
+            lastSeen: new Date(),
+            online: true
+          },
+          { new: true }
+        );
       }
-      
-      console.log(`Call request from ${data.from} to ${data.to}`);
-      
-      // Find the target user's socket
-      const targetUser = await User.findOne({ userName: data.to });
-      if (!targetUser) {
-        console.log(`Target user ${data.to} not found in database`);
-        socket.emit('user-not-available', {
-          caller: data.from,
-          callee: data.to
-        });
-        return;
-      }
-
-      if (!targetUser.socketId) {
-        console.log(`Target user ${data.to} has no socketId`);
-        socket.emit('user-not-available', {
-          caller: data.from,
-          callee: data.to
-        });
-        return;
-      }
-      
-      // Check if the target socket exists in our active connections
-      const userSocketId = targetUser.socketId;
-      const isSocketActive = activeUsers.get(data.to) === userSocketId;
-      
-      // Get a list of all connected sockets for verification
-      const sockets = await io.fetchSockets();
-      const socketExists = sockets.some(s => s.id === userSocketId);
-      
-      console.log(`User ${data.to} socket status:`, { 
-        socketId: userSocketId,
-        isInActiveMap: isSocketActive,
-        socketExists: socketExists,
-        online: targetUser.online
-      });
-      
-      // If socket doesn't exist in active connections or connected sockets
-      if (!isSocketActive || !socketExists) {
-        console.log(`Socket for user ${data.to} is not active or doesn't exist`);
-        
-        // Try to find any other socket for this user
-        const newSocketId = sockets.find(s => 
-          s.handshake.query && 
-          s.handshake.query.userName === data.to
-        )?.id;
-        
-        if (newSocketId) {
-          console.log(`Found alternative socket for ${data.to}: ${newSocketId}`);
-          // Update the user's socket ID
-          await User.findOneAndUpdate(
-            { userName: data.to },
-            { socketId: newSocketId }
-          );
-          
-          // Update active users map
-          activeUsers.set(data.to, newSocketId);
-          
-          // Forward call to the new socket
-          io.to(newSocketId).emit('call-user', {
-            from: data.from,
-            to: data.to
-          });
-          
-          console.log(`Call forwarded to alternative socket`);
-          return;
-        }
-        
-        // No alternative socket found, user is not available
-        console.log(`No alternative socket found for ${data.to}`);
-        socket.emit('user-not-available', {
-          caller: data.from,
-          callee: data.to
-        });
-        return;
-      }
-      
-      // Check if the user is online in database
-      if (!targetUser.online) {
-        console.log(`User ${data.to} is marked as offline in database`);
-        
-        // Only if they're in active users map, try to deliver call
-        if (isSocketActive && socketExists) {
-          console.log(`User ${data.to} has an active socket despite being offline, attempting call`);
-          // Update user to online
-          await User.findOneAndUpdate(
-            { userName: data.to },
-            { online: true }
-          );
-        } else {
-          socket.emit('user-not-available', {
-            caller: data.from,
-            callee: data.to
-          });
-          return;
-        }
-      }
-      
-      console.log(`Forwarding call to ${data.to} via socket ${userSocketId}`);
-      
-      // Forward the call request to the target user with retries
-      const emitWithRetry = (retries = 3) => {
-        if (retries <= 0) {
-          console.log(`Call delivery to ${data.to} failed after retries`);
-          socket.emit('user-not-available', {
-            caller: data.from,
-            callee: data.to
-          });
-          return;
-        }
-        
-        // Try to emit directly to the socket
-        const socket = io.sockets.sockets.get(userSocketId);
-        if (socket) {
-          console.log(`Delivering call directly to socket ${userSocketId}`);
-          socket.emit('call-user', {
-            from: data.from,
-            to: data.to
-          });
-        } else {
-          // Use io.to as fallback
-          console.log(`Socket object not found, using io.to() method to deliver call`);
-          io.to(userSocketId).emit('call-user', {
-            from: data.from,
-            to: data.to
-          });
-        }
-        
-        // Schedule a retry with backoff
-        setTimeout(() => {
-          // Skip retry if call was answered
-          User.findOne({ userName: data.to })
-            .then(user => {
-              if (!user || !user.online) {
-                console.log(`Retrying call delivery to ${data.to}, attempts left: ${retries-1}`);
-                emitWithRetry(retries - 1);
-              }
-            });
-        }, 1000 * (4 - retries)); // increasing delay: 1s, 2s, 3s
-      };
-      
-      // Start delivery with retries
-      emitWithRetry();
-      
     } catch (error) {
-      console.error('Error handling call request:', error);
-      socket.emit('user-not-available', {
-        caller: data.from,
-        callee: data.to
-      });
+      console.error('Error processing heartbeat:', error);
     }
   });
 
-  // Handle WebRTC signaling data
-  socket.on('call-signal', (data) => {
-    if (!data || !data.signalData || !data.to) {
-      console.log('Invalid call signal data');
-      return;
+  // Handle socket disconnection with improved reliability
+  socket.on('disconnect', async (reason) => {
+    try {
+      console.log(`Socket disconnected: ${socket.id}, reason: ${reason}`);
+      performanceStats.disconnections++;
+      
+      // Find the username for this socket
+      let disconnectedUser = null;
+      activeUsers.forEach((socketId, userName) => {
+        if (socketId === socket.id) {
+          disconnectedUser = userName;
+        }
+      });
+      
+      if (disconnectedUser) {
+        console.log(`User disconnected: ${disconnectedUser}`);
+        
+        // Don't immediately mark as offline - wait for reconnect opportunity
+        if (reason === 'transport close' || reason === 'ping timeout') {
+          // These are likely temporary disconnects, wait 10 seconds before marking offline
+          setTimeout(async () => {
+            try {
+              // Check if user reconnected during grace period
+              const currentSocketId = activeUsers.get(disconnectedUser);
+              if (currentSocketId !== socket.id) {
+                console.log(`User ${disconnectedUser} reconnected with new socket, not marking offline`);
+                return;
+              }
+              
+              // Get last active timestamp
+              const lastActive = userSessions.get(disconnectedUser) || 0;
+              const now = Date.now();
+              
+              // If user has been active recently (within 1 minute), keep them as online but update last seen
+              if (now - lastActive < 60000) {
+                console.log(`User ${disconnectedUser} was active recently, keeping as online`);
+                return;
+              }
+              
+              // Mark as offline after grace period if no reconnect
+              const user = await User.findOneAndUpdate(
+                { userName: disconnectedUser },
+                { online: false, lastSeen: new Date() },
+                { new: true }
+              );
+              
+              if (user) {
+                // Remove from active users
+                activeUsers.delete(disconnectedUser);
+                
+                // Broadcast offline status to all clients
+                io.emit('user-offline', {
+                  userName: disconnectedUser,
+                  lastSeen: new Date().toISOString()
+                });
+                
+                // Update user list for all clients
+                throttledBroadcast.scheduleUserUpdate(disconnectedUser);
+              }
+            } catch (error) {
+              console.error(`Error handling delayed disconnect for ${disconnectedUser}:`, error);
+            }
+          }, 10000); // 10 second grace period
+        } else if (reason === 'client namespace disconnect' || reason === 'server namespace disconnect') {
+          // Intentional disconnects should be marked offline immediately
+          try {
+            await User.findOneAndUpdate(
+              { userName: disconnectedUser },
+              { online: false, lastSeen: new Date() },
+              { new: true }
+            );
+            
+            // Remove from active users
+            activeUsers.delete(disconnectedUser);
+            
+            // Broadcast offline status
+            io.emit('user-offline', {
+              userName: disconnectedUser,
+              lastSeen: new Date().toISOString()
+            });
+            
+            // Update user list
+            throttledBroadcast.scheduleUserUpdate(disconnectedUser);
+          } catch (error) {
+            console.error(`Error handling disconnect for ${disconnectedUser}:`, error);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error in disconnect handler:', error);
     }
-    
-    console.log(`Call signal from ${data.from} to ${data.to}`);
-    
-    User.findOne({ userName: data.to })
-      .then(user => {
-        if (!user) {
-          console.log(`User ${data.to} not found for call signal`);
-          return;
-        }
-        
-        if (!user.socketId) {
-          console.log(`No socketId for user ${data.to}`);
-          return;
-        }
-        
-        console.log(`Forwarding call signal to ${user.userName} via socket ${user.socketId}`);
-        
-        // Check if we can get the actual socket
-        const targetSocket = io.sockets.sockets.get(user.socketId);
-        if (targetSocket) {
-          // Direct emission is more reliable
-          targetSocket.emit('call-signal', {
-            signalData: data.signalData,
-            from: data.from,
-            to: data.to
-          });
-          console.log(`Call signal delivered directly to socket`);
-        } else {
-          // Fallback to room emission
-          io.to(user.socketId).emit('call-signal', {
-            signalData: data.signalData,
-            from: data.from,
-            to: data.to
-          });
-          console.log(`Call signal delivered via room emission`);
-        }
-      })
-      .catch(error => {
-        console.error('Error forwarding call signal:', error);
-      });
   });
 
-  // Handle call acceptance
-  socket.on('call-accepted', (data) => {
-    if (!data || !data.signalData || !data.to) return;
-    
-    User.findOne({ userName: data.to })
-      .then(user => {
-        if (user && user.socketId) {
-          io.to(user.socketId).emit('call-accepted', {
-            signalData: data.signalData,
-            from: data.from,
-            to: data.to
-          });
-        }
-      })
-      .catch(error => {
-        console.error('Error forwarding call acceptance:', error);
+  // Handle user explicitly going offline
+  socket.on('user-offline', async (data) => {
+    try {
+      if (!data || !data.userName) return;
+      
+      console.log(`User explicitly went offline: ${data.userName}`);
+      
+      // Update user in database
+      await User.findOneAndUpdate(
+        { userName: data.userName },
+        { 
+          online: false, 
+          lastSeen: new Date() 
+        },
+        { new: true }
+      );
+      
+      // Remove from active users
+      activeUsers.delete(data.userName);
+      
+      // Broadcast offline status
+      io.emit('user-offline', {
+        userName: data.userName,
+        lastSeen: data.timestamp || new Date().toISOString()
       });
-  });
-
-  // Handle call rejection
-  socket.on('call-rejected', (data) => {
-    if (!data || !data.from || !data.to) return;
-    
-    User.findOne({ userName: data.to })
-      .then(user => {
-        if (user && user.socketId) {
-          io.to(user.socketId).emit('call-rejected', {
-            from: data.from,
-            to: data.to
-          });
-        }
-      })
-      .catch(error => {
-        console.error('Error forwarding call rejection:', error);
-      });
-  });
-
-  // Handle call ending
-  socket.on('call-ended', (data) => {
-    if (!data || !data.from || !data.to) return;
-    
-    User.findOne({ userName: data.to })
-      .then(user => {
-        if (user && user.socketId) {
-          io.to(user.socketId).emit('call-ended', {
-            from: data.from,
-            to: data.to
-          });
-        }
-      })
-      .catch(error => {
-        console.error('Error forwarding call end:', error);
-      });
+      
+      // Update user list
+      throttledBroadcast.scheduleUserUpdate(data.userName);
+    } catch (error) {
+      console.error('Error handling user-offline:', error);
+    }
   });
 
   // Handle user not available for call
@@ -1316,6 +1385,49 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Handle user reconnection with session recreation
+  socket.on('user-reconnect', async (userData) => {
+    try {
+      if (!userData || !userData.userName) return;
+      
+      const userName = userData.userName;
+      console.log(`User attempting reconnection: ${userName}`);
+      
+      // Check if user exists in database
+      const exists = await checkUser({ userName });
+      
+      if (!exists) {
+        console.log(`User ${userName} doesn't exist in database, recreating...`);
+        // Recreate user in database
+        await saveUser({
+          ...userData,
+          lastSeen: new Date(),
+        });
+        
+        console.log(`User ${userName} recreated in database`);
+      }
+      
+      // Update user in active users list
+      socket.userName = userName;
+      activeUsers.set(userName, socket.id);
+      
+      // Update last seen timestamp
+      await updateLastSeen(userName);
+      
+      // Broadcast to all users
+      io.emit('user-online', { userName });
+      
+      // Confirm successful reconnection
+      socket.emit('reconnect-confirmed', { success: true });
+      
+      console.log(`User successfully reconnected: ${userName} (Socket ID: ${socket.id})`);
+    } catch (error) {
+      console.error(`Error handling user-reconnect for ${userData?.userName}:`, error);
+      socket.emit('reconnect-confirmed', { success: false, error: 'Failed to reconnect' });
+      performanceStats.errors++;
+    }
+  });
+
   // Clean up listeners on unmount
   cleanupListeners(socket);
 });
@@ -1415,4 +1527,40 @@ io.engine.pingInterval = 5000; // 5 seconds
 
 server.listen(5000, () => {
   console.log('Server listening on *:5000');
+}); 
+
+// Add user offline API endpoint
+app.post('/api/user-offline', express.json(), async (req, res) => {
+  try {
+    const { userName, timestamp } = req.body;
+    
+    if (!userName) {
+      return res.status(400).json({ error: 'Username is required' });
+    }
+    
+    console.log(`API: User offline notification for ${userName}`);
+    
+    // Update the user's status in the database
+    await User.findOneAndUpdate(
+      { userName },
+      { 
+        online: false, 
+        lastSeen: timestamp || new Date()
+      }
+    );
+    
+    // Notify other users
+    io.emit('user-offline', {
+      userName,
+      lastSeen: timestamp || new Date().toISOString()
+    });
+    
+    // Remove from active users list
+    activeUsers.delete(userName);
+    
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    console.error('Error in user-offline API:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
 }); 

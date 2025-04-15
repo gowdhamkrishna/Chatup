@@ -28,6 +28,9 @@ const ChatPage = () => {
   const [incomingCall, setIncomingCall] = useState(null);
   const [outgoingCall, setOutgoingCall] = useState(false);
   
+  // Add state for notifications and sound settings
+  const [notificationSound, setNotificationSound] = useState(true);
+  
   const messageEndRef = useRef(null);
   const inputRef = useRef(null);
   const emojiPickerRef = useRef(null);
@@ -65,87 +68,265 @@ const ChatPage = () => {
     setIsLoading(false);
   }, [router]);
 
+  // Add new state for session persistence
+  const [sessionRefreshInterval, setSessionRefreshInterval] = useState(null);
+  const [sessionLastActive, setSessionLastActive] = useState(Date.now());
+  const SESSION_TIMEOUT = 30 * 60 * 1000; // 30 minutes in milliseconds
+  
+  // Store selected user in local storage for session persistence
+  useEffect(() => {
+    if (selectedUser) {
+      localStorage.setItem("selectedChatUser", JSON.stringify({
+        userName: selectedUser.userName,
+        _id: selectedUser._id,
+        timestamp: Date.now()
+      }));
+    }
+  }, [selectedUser]);
+  
+  // Restore selected user from local storage on initial load
+  useEffect(() => {
+    if (!selectedUser && userData && onlineUsers.length > 0) {
+      const savedChat = localStorage.getItem("selectedChatUser");
+      
+      if (savedChat) {
+        try {
+          const parsedChat = JSON.parse(savedChat);
+          const timestamp = parsedChat.timestamp || 0;
+          const now = Date.now();
+          
+          // Only restore if less than 1 hour old
+          if (now - timestamp < 60 * 60 * 1000) {
+            const foundUser = onlineUsers.find(u => u.userName === parsedChat.userName);
+            if (foundUser) {
+              console.log("Restoring chat with:", foundUser.userName);
+              setSelectedUser(foundUser);
+            }
+          } else {
+            // Clear outdated chat session
+            localStorage.removeItem("selectedChatUser");
+          }
+        } catch (error) {
+          console.error("Error restoring chat session:", error);
+        }
+      }
+    }
+  }, [userData, onlineUsers, selectedUser]);
+
+  // Create a heartbeat system to maintain session
+  useEffect(() => {
+    if (!userData?.userName) return;
+    
+    const heartbeatInterval = setInterval(() => {
+      const now = Date.now();
+      
+      // Check if user has been inactive, if active reset timer
+      if (document.hasFocus()) {
+        setSessionLastActive(now);
+      }
+      
+      // If user has been inactive for too long, don't send heartbeat
+      const timeSinceLastActive = now - sessionLastActive;
+      if (timeSinceLastActive < SESSION_TIMEOUT) {
+        // Send heartbeat to keep session alive
+        socket.emit("heartbeat", {
+          userName: userData.userName,
+          lastActive: now
+        });
+      }
+    }, 20000); // Send heartbeat every 20 seconds
+    
+    // Listen for user activity to reset the inactive timer
+    const resetActivity = () => setSessionLastActive(Date.now());
+    window.addEventListener('mousemove', resetActivity);
+    window.addEventListener('keydown', resetActivity);
+    window.addEventListener('click', resetActivity);
+    window.addEventListener('touchstart', resetActivity);
+    window.addEventListener('focus', resetActivity);
+    
+    // On window unload, try to notify server so it can set offline immediately
+    const handleUnload = () => {
+      try {
+        const offlineEvent = new XMLHttpRequest();
+        offlineEvent.open('POST', '/api/user-offline', false); // Synchronous request
+        offlineEvent.setRequestHeader('Content-Type', 'application/json');
+        offlineEvent.send(JSON.stringify({
+          userName: userData.userName,
+          timestamp: new Date().toISOString()
+        }));
+      } catch (e) {
+        // Ignore errors on unload
+      }
+    };
+    window.addEventListener('beforeunload', handleUnload);
+    
+    setSessionRefreshInterval(heartbeatInterval);
+    
+    return () => {
+      clearInterval(heartbeatInterval);
+      window.removeEventListener('mousemove', resetActivity);
+      window.removeEventListener('keydown', resetActivity);
+      window.removeEventListener('click', resetActivity);
+      window.removeEventListener('touchstart', resetActivity);
+      window.removeEventListener('focus', resetActivity);
+      window.removeEventListener('beforeunload', handleUnload);
+    };
+  }, [userData, sessionLastActive]);
+
   // Get online users
   useEffect(() => {
     if (userData?.userName) {
-    getOnlineData();
-      // Send ping every 30 seconds to keep user active
-      const pingInterval = setInterval(() => {
-        socket.emit('ping-user', userData.userName);
-      }, 30000);
+      getOnlineData();
       
-      return () => clearInterval(pingInterval);
+      // Create more aggressive polling for online status
+      const fastPoll = setInterval(() => {
+        // Fast polling only when the tab is visible 
+        if (document.visibilityState === 'visible') {
+          socket.emit('ping-user', userData.userName);
+          
+          // Request fresh data to update user statuses
+          getOnlineData();
+        }
+      }, 15000); // Poll every 15 seconds when tab is visible
+      
+      // Create slower background polling
+      const slowPoll = setInterval(() => {
+        socket.emit('ping-user', userData.userName);
+      }, 60000); // Slower ping every minute even when tab not visible
+      
+      // Refresh immediately when tab becomes visible
+      const handleVisibilityChange = () => {
+        if (document.visibilityState === 'visible') {
+          socket.emit('ping-user', userData.userName);
+          getOnlineData();
+          
+          // If session is still valid, reconnect socket if needed
+          const now = Date.now();
+          const timeSinceLastActive = now - sessionLastActive;
+          if (timeSinceLastActive < SESSION_TIMEOUT) {
+            socket.emit('user-online', userData.userName);
+          }
+        }
+      };
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+      
+      return () => {
+        clearInterval(fastPoll);
+        clearInterval(slowPoll);
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      };
     }
-  }, [userData]);
+  }, [userData, sessionLastActive]);
 
-  const getOnlineData = async () => {
+  const getOnlineData = async (forceRefresh = false) => {
     if (userData?.userName) {
       try {
-        const users = await getUsers(userData);
-        const initializedUsers = users.map(user => ({
-          ...user,
-          chatWindow: user.chatWindow || [],
-          // Ensure online status is a boolean, default to false if undefined
-          online: !!user.online
-        }));
-        
-        // Update state carefully to maintain offline users
-        setOnline(prevUsers => {
-          // Create a map of existing users to preserve offline status that may be more recent
-          const prevUserMap = new Map();
-          prevUsers.forEach(user => {
-            prevUserMap.set(user.userName, user);
+        // Only fetch if forced or if it's been more than 15 seconds since last fetch
+        if (forceRefresh || !window.lastOnlineFetch || Date.now() - window.lastOnlineFetch > 15000) {
+          window.lastOnlineFetch = Date.now();
+          
+          const users = await getUsers(userData);
+          const initializedUsers = users.map(user => {
+            // If we have existing data for this user
+            const existingUser = onlineUsers.find(u => u.userName === user.userName);
+            
+            return {
+              ...user,
+              chatWindow: user.chatWindow || (existingUser?.chatWindow || []),
+              // For online status, preserve existing if we just fetched recently (5 sec)
+              online: existingUser && Date.now() - window.lastOnlineFetch < 5000 ? 
+                     existingUser.online : !!user.online,
+              // Use the more recent lastSeen time
+              lastSeen: existingUser && new Date(existingUser.lastSeen) > new Date(user.lastSeen || 0) ?
+                       existingUser.lastSeen : user.lastSeen
+            };
           });
           
-          // Update users, keeping offline status if it's more recent
-          return initializedUsers.map(newUser => {
-            const existingUser = prevUserMap.get(newUser.userName);
+          // Additional logic for merging
+          setOnline(prevUsers => {
+            // Create a map of existing users to preserve data
+            const prevUserMap = new Map();
+            prevUsers.forEach(user => {
+              prevUserMap.set(user.userName, user);
+            });
             
-            // If we have an existing user who is currently marked as offline
-            // and they're also marked as offline in the new data
-            if (existingUser && !existingUser.online && !newUser.online) {
-              // Keep the most recent lastSeen timestamp
-              const existingLastSeen = new Date(existingUser.lastSeen || 0);
-              const newLastSeen = new Date(newUser.lastSeen || 0);
+            // For each new user, determine if we should keep existing data
+            return initializedUsers.map(newUser => {
+              const existingUser = prevUserMap.get(newUser.userName);
               
-              if (existingLastSeen > newLastSeen) {
+              if (!existingUser) return newUser;
+              
+              // Logic for merging offline users
+              if (!newUser.online && !existingUser.online) {
+                // Keep the most recent lastSeen timestamp
+                const existingLastSeen = new Date(existingUser.lastSeen || 0);
+                const newLastSeen = new Date(newUser.lastSeen || 0);
+                
+                if (existingLastSeen > newLastSeen) {
+                  return {
+                    ...newUser,
+                    lastSeen: existingUser.lastSeen
+                  };
+                }
+              }
+              
+              // If user was online in our existing data but offline in new data
+              // Keep them online until we can verify with server
+              if (existingUser.online && !newUser.online) {
+                // Verify with server, but keep online in UI until confirmed
+                socket.emit("check-user-online", {
+                  userName: newUser.userName
+                });
+                
                 return {
                   ...newUser,
+                  online: true,
                   lastSeen: existingUser.lastSeen
                 };
               }
-            } else if (existingUser && existingUser.online && !newUser.online) {
-              // If the user was previously online but now appears offline in the new data,
-              // let's verify they're actually offline by checking active socketId
-              return {
-                ...newUser,
-                online: true // Keep them online until we can verify with server
-              };
-            }
-            
-            return newUser;
+              
+              // Merge chat window data to avoid losing messages
+              if (existingUser.chatWindow && existingUser.chatWindow.length > 0) {
+                // Only update chatWindow in new user if existing has data
+                if (!newUser.chatWindow || newUser.chatWindow.length === 0) {
+                  return {
+                    ...newUser,
+                    chatWindow: existingUser.chatWindow
+                  };
+                }
+                
+                // Merge chat windows (avoiding duplicates)
+                const existingMsgIds = new Set(existingUser.chatWindow.map(msg => msg.id));
+                const newMsgs = newUser.chatWindow.filter(msg => !existingMsgIds.has(msg.id));
+                
+                return {
+                  ...newUser,
+                  chatWindow: [...existingUser.chatWindow, ...newMsgs]
+                };
+              }
+              
+              return newUser;
+            });
           });
-        });
-
-        // If we have a selected user, make sure to refresh their online status
-        if (selectedUser) {
-          // Find the user in our updated list
-          socket.emit("check-user-online", {
-            userName: selectedUser.userName
-          });
-        }
-        
-        // Request updated online status from server
-        const onlineUserNames = initializedUsers
-          .filter(user => user.online === true)
-          .map(user => user.userName);
+  
+          // If we have a selected user, request to verify their status specifically
+          if (selectedUser) {
+            socket.emit("check-user-online", {
+              userName: selectedUser.userName
+            });
+          }
           
-        // Request server to verify these users are actually online
-        if (onlineUserNames.length > 0) {
-          socket.emit("verify-online-users", {
-            users: onlineUserNames,
-            requester: userData.userName
-          });
+          // Verify all users that are marked as online
+          const onlineUserNames = initializedUsers
+            .filter(user => user.online === true)
+            .map(user => user.userName);
+            
+          if (onlineUserNames.length > 0) {
+            socket.emit("verify-online-users", {
+              users: onlineUserNames,
+              requester: userData.userName
+            });
+          }
         }
       } catch (error) {
         console.error("Error fetching users:", error);
@@ -196,24 +377,30 @@ const ChatPage = () => {
         const userIndex = newUsers.findIndex(u => u.userName === data.userName);
         
         if (userIndex !== -1) {
+          // Create a timestamp for this offline event
+          const offlineTimestamp = data.lastSeen || new Date().toISOString();
+          
           newUsers[userIndex] = {
             ...newUsers[userIndex],
             online: false,
-            lastSeen: data.lastSeen
+            lastSeen: offlineTimestamp
           };
           
           // If this is the selected user, update that reference too
           if (selectedUser && selectedUser.userName === data.userName) {
-            setSelectedUser({
-              ...selectedUser,
+            setSelectedUser(prev => ({
+              ...prev,
               online: false,
-              lastSeen: data.lastSeen
-            });
+              lastSeen: offlineTimestamp
+            }));
           }
         }
         
         return newUsers;
       });
+      
+      // Force a data refresh to confirm status
+      setTimeout(() => getOnlineData(true), 3000);
     });
     
     // Handle updates to the user's own data
@@ -319,13 +506,13 @@ const ChatPage = () => {
       // Play notification sound if not currently viewing this conversation
       if (!selectedUser || selectedUser.userName !== messageData.user) {
         // Check if this is an image message for special notification
-        if (messageData.imageUrl) {
-          console.log('Image received:', messageData.imageUrl);
-          // You could play a different notification sound for images
-          // Example: new Audio('/image-notification.mp3').play().catch(e => console.log('Audio play prevented'));
-        } else {
-          // Regular message notification
-          // Example: new Audio('/notification.mp3').play().catch(e => console.log('Audio play prevented'));
+        if (notificationSound) {
+          try {
+            const audio = new Audio('/Biscay_Essential_PH-1_Stock_Notification-642959-mobiles24.mp3');
+            audio.play().catch(e => console.log('Audio play prevented by browser policy'));
+          } catch (error) {
+            console.error('Error playing notification sound:', error);
+          }
         }
       }
     });
@@ -371,13 +558,59 @@ const ChatPage = () => {
   const markMessagesAsRead = (fromUser) => {
     if (!userData || !fromUser) return;
     
+    console.log(`Marking messages from ${fromUser} as read`);
+    
     // Create or get a debounced function for this user
     if (!debouncedMarkReadFuncs[fromUser]) {
       debouncedMarkReadFuncs[fromUser] = debounce((user) => {
-        console.log(`Marking messages from ${user} as read`);
+        console.log(`Sending read receipts for ${user}`);
         socket.emit('mark-messages-read', {
           from: user,
           to: userData.userName
+        });
+        
+        // Play a subtle read notification sound
+        try {
+          const audio = new Audio('/mark-read-sound.mp3');
+          audio.volume = 0.2; // Quieter than message notification
+          audio.play().catch(e => console.log('Audio play prevented by browser policy'));
+        } catch (error) {
+          console.error('Error playing read sound:', error);
+        }
+        
+        // Also update the local state to immediately reflect read status
+        setOnline(prev => {
+          const newUsers = [...prev];
+          const userIndex = newUsers.findIndex(u => u.userName === user);
+          
+          if (userIndex !== -1) {
+            const updatedUser = JSON.parse(JSON.stringify(newUsers[userIndex]));
+            if (updatedUser.chatWindow) {
+              // Mark any messages from this user to the current user as read
+              let hasUnreadMessages = false;
+              updatedUser.chatWindow = updatedUser.chatWindow.map(msg => {
+                if (msg.user === user && msg.to === userData.userName && !msg.read) {
+                  hasUnreadMessages = true;
+                  return { ...msg, read: true };
+                }
+                return msg;
+              });
+              
+              // Only update if there were actually unread messages
+              if (hasUnreadMessages) {
+                newUsers[userIndex] = updatedUser;
+                
+                // If this is the selected user, update that reference too
+                if (selectedUser && selectedUser.userName === user) {
+                  setSelectedUser(updatedUser);
+                }
+                
+                return [...newUsers];
+              }
+            }
+          }
+          
+          return prev;
         });
       }, 300); // 300ms debounce time
     }
@@ -468,11 +701,88 @@ const ChatPage = () => {
     );
   };
 
+  // Add this function before handleSendMessage
+  const verifyUserExists = async () => {
+    if (!userData) return false;
+    
+    try {
+      // Check if user exists in database
+      const response = await fetch(`http://localhost:5000/check-user?userName=${userData.userName}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+      
+      const data = await response.json();
+      
+      // If user doesn't exist, recreate user using socket
+      if (!data.exists) {
+        console.log("User doesn't exist in database, recreating via socket...", userData);
+        
+        return new Promise((resolve) => {
+          // Set up one-time listener for reconnect confirmation
+          const reconnectListener = (response) => {
+            console.log("Reconnect response:", response);
+            socket.off('reconnect-confirmed', reconnectListener);
+            resolve(response.success);
+          };
+          
+          // Listen for confirmation
+          socket.on('reconnect-confirmed', reconnectListener);
+          
+          // Send reconnect request with all user data
+          socket.emit('user-reconnect', userData);
+          
+          // Set a timeout just in case we don't get a response
+          setTimeout(() => {
+            socket.off('reconnect-confirmed', reconnectListener);
+            console.warn("Reconnect timed out, attempting fallback");
+            
+            // Fallback to REST API if socket times out
+            fetch('http://localhost:5000/recreate-user', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(userData),
+            })
+            .then(res => res.json())
+            .then(data => {
+              if (data.success) {
+                socket.emit('user-online', userData.userName);
+                resolve(true);
+              } else {
+                resolve(false);
+              }
+            })
+            .catch(err => {
+              console.error("Fallback failed:", err);
+              resolve(false);
+            });
+          }, 5000);
+        });
+      }
+      
+      return true;
+    } catch (error) {
+      console.error("Error verifying user exists:", error);
+      return false;
+    }
+  };
+
   // Handle sending messages
   const handleSendMessage = async (e) => {
     e.preventDefault();
     const trimmedMessage = message.trim();
     if ((trimmedMessage === "" && !imageFile) || !selectedUser || !userData) return;
+
+    // Verify user exists in database before sending message
+    const userExists = await verifyUserExists();
+    if (!userExists) {
+      alert("There was an issue with your session. Please refresh the page.");
+      return;
+    }
 
     const timestamp = new Date().toISOString();
     let imageUrl = null;
@@ -711,6 +1021,17 @@ const ChatPage = () => {
     return user.chatWindow.filter(msg => !isMessageFromMe(msg) && !msg.read).length;
   };
 
+  // Enhanced getUnreadCount function to return object with count and latest message
+  const getUnreadMessageInfo = (user) => {
+    if (!user || !user.chatWindow) return { count: 0, latestMessage: null };
+    
+    const unreadMessages = user.chatWindow.filter(msg => !isMessageFromMe(msg) && !msg.read);
+    const count = unreadMessages.length;
+    const latestMessage = count > 0 ? unreadMessages[unreadMessages.length - 1] : null;
+    
+    return { count, latestMessage };
+  };
+
   // Memoize expensive operations like conversation filtering
   const getConversation = React.useCallback(() => {
     if (!selectedUser?.chatWindow || !userData) return [];
@@ -787,7 +1108,7 @@ const ChatPage = () => {
                     </svg>
                   ) : (
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                      <path d="M10 2a8 8 0 100 16 8 8 0 000-16zm0 14a6 6 0 110-12 6 6 0 010 12z" />
+                      <path d="M10 2a8 8 0 100 16 8 8 0 000 16zm0 14a6 6 0 110-12 6 6 0 010 12z" />
                     </svg>
                   )}
                 </span>
@@ -1137,6 +1458,27 @@ const ChatPage = () => {
       // Send a ping to ensure we're marked as online
       socket.emit("ping-user", userData.userName);
       socket.emit("user-online", userData.userName);
+      
+      // Add listener for user-not-found events
+      const handleUserNotFound = async () => {
+        console.log("Server reports user not found in database, attempting recreation");
+        const success = await verifyUserExists();
+        if (success) {
+          console.log("User successfully recreated");
+          // Re-establish connection
+          socket.emit("user-online", userData.userName);
+        } else {
+          console.error("Failed to recreate user after not-found event");
+          // Could show an error or redirect to login
+        }
+      };
+      
+      socket.on("user-not-found", handleUserNotFound);
+      
+      // Clean up listener when component unmounts
+      return () => {
+        socket.off("user-not-found", handleUserNotFound);
+      };
     }
   }, [userData]);
 
@@ -1195,6 +1537,63 @@ const ChatPage = () => {
       socket.off("user-online-status", handleSelectedUserStatus);
     };
   }, [selectedUser, userData]);
+
+  // Add notification title update for browser tab
+  useEffect(() => {
+    // Count total unread messages
+    const totalUnreadCount = onlineUsers.reduce((total, user) => {
+      return total + getUnreadCount(user);
+    }, 0);
+    
+    // Update the document title to show unread message count
+    if (totalUnreadCount > 0) {
+      document.title = `(${totalUnreadCount}) ChatApp`;
+    } else {
+      document.title = "ChatApp";
+    }
+    
+    // Restore original title when component unmounts
+    return () => {
+      document.title = "ChatApp";
+    };
+  }, [onlineUsers]);
+
+  // Add reconnection logic for socket
+  useEffect(() => {
+    const handleReconnect = async () => {
+      console.log("Socket reconnected, updating user status");
+      if (userData?.userName) {
+        try {
+          // Check if user exists in database before re-establishing presence
+          const userExists = await verifyUserExists();
+          
+          if (userExists) {
+            console.log("User verified after reconnection, re-establishing presence");
+            // Reestablish our online presence
+            socket.emit('user-online', userData.userName);
+            
+            // Force refresh data
+            getOnlineData(true);
+          } else {
+            console.warn("User doesn't exist in database after reconnection");
+            // User recreation was attempted in verifyUserExists
+            setTimeout(() => getOnlineData(true), 1000);
+          }
+        } catch (error) {
+          console.error("Error during reconnection:", error);
+          // Still try to reconnect
+          socket.emit('user-online', userData.userName);
+          getOnlineData(true);
+        }
+      }
+    };
+    
+    socket.on('connect', handleReconnect);
+    
+    return () => {
+      socket.off('connect', handleReconnect);
+    };
+  }, [userData]);
 
   if (isLoading) {
     return (
@@ -1302,7 +1701,7 @@ const ChatPage = () => {
               />
               <span className="absolute bottom-0 right-0 w-4 h-4 rounded-full bg-green-400 border-2 border-white"></span>
             </div>
-            <div className="flex flex-col">
+            <div className="flex flex-col flex-grow">
               <h2 className="font-semibold text-lg">
                 {userData?.userName || "Guest User"}
               </h2>
@@ -1311,6 +1710,22 @@ const ChatPage = () => {
                 Online
               </span>
             </div>
+            <button 
+              onClick={() => setNotificationSound(!notificationSound)}
+              className="p-2 bg-white bg-opacity-20 rounded-full hover:bg-opacity-30 transition-colors"
+              title={notificationSound ? "Turn off notification sounds" : "Turn on notification sounds"}
+            >
+              {notificationSound ? (
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M10 2a6 6 0 00-6 6v3.586l-.707.707A1 1 0 004 14h12a1 1 0 00.707-1.707L16 11.586V8a6 6 0 00-6-6zM10 18a3 3 0 01-3-3h6a3 3 0 01-3 3z" clipRule="evenodd" />
+                </svg>
+              ) : (
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M13 11.586V8a3 3 0 00-6 0v3.586l-.707.707A1 1 0 006 14h8a1 1 0 00.707-1.707L13 11.586z" clipRule="evenodd" />
+                  <path d="M3.293 4.293a1 1 0 011.414 0L10 9.586l5.293-5.293a1 1 0 011.414 1.414L11.414 11l5.293 5.293a1 1 0 01-1.414 1.414L10 12.414l-5.293 5.293a1 1 0 01-1.414-1.414L8.586 11 3.293 5.707a1 1 0 010-1.414z" />
+                </svg>
+              )}
+            </button>
           </div>
 
           {/* Filter Section */}
@@ -1377,13 +1792,14 @@ const ChatPage = () => {
               ) : (
                 getFilteredUsers().map((user) => {
                   const unreadCount = getUnreadCount(user);
+                  const { latestMessage } = getUnreadMessageInfo(user);
                   return (
                     <div
                       key={user._id}
                       className={`flex items-center gap-3 p-3 rounded-xl transition cursor-pointer hover:shadow-md ${
                         selectedUser?._id === user._id
                           ? "bg-gradient-to-r from-blue-50 to-indigo-50 border-l-4 border-blue-500 shadow-sm"
-                          : "hover:bg-gray-50"
+                          : unreadCount > 0 ? "bg-blue-50 border-l-4 border-red-500" : "hover:bg-gray-50"
                       }`}
                       onClick={() => setSelectedUser(user)}
                     >
@@ -1397,20 +1813,33 @@ const ChatPage = () => {
                       </div>
                       <div className="flex flex-col min-w-0">
                         <span className="text-sm font-medium text-gray-800 truncate">
-                          {user.userName}
+                          {user.userName} {unreadCount > 0 && <span className="text-red-500">•</span>}
                         </span>
-                        <span className="text-xs text-gray-500">
-                          <span className="capitalize">{user.Gender || 'Unknown'}</span> • {user.Age || '--'} yrs • 
-                          {user.online 
-                            ? <span className="text-green-600 font-medium"> Online</span> 
-                            : ` Last seen: ${formatLastSeen(user.lastSeen)}`}
+                        <span className="text-xs text-gray-500 truncate">
+                          {latestMessage ? (
+                            <span className="text-gray-700 font-medium truncate">
+                              {latestMessage.message?.substring(0, 20)}
+                              {latestMessage.message?.length > 20 ? '...' : ''}
+                              {latestMessage.imageUrl && ' 📷'}
+                            </span>
+                          ) : (
+                            <>
+                              <span className="capitalize">{user.Gender || 'Unknown'}</span> • {user.Age || '--'} yrs • 
+                              {user.online 
+                                ? <span className="text-green-600 font-medium"> Online</span> 
+                                : ` Last seen: ${formatLastSeen(user.lastSeen)}`}
+                            </>
+                          )}
                         </span>
                       </div>
                       {unreadCount > 0 && (
-                        <div className="ml-auto">
-                          <span className="bg-gradient-to-r from-blue-500 to-indigo-600 text-white text-xs rounded-full h-6 w-6 flex items-center justify-center shadow-sm">
-                            {unreadCount}
-                          </span>
+                        <div className="ml-auto flex items-center">
+                          <div className="flex flex-col items-end">
+                            <span className="bg-gradient-to-r from-blue-500 to-indigo-600 text-white text-xs rounded-full h-6 w-6 flex items-center justify-center shadow-sm">
+                              {unreadCount}
+                            </span>
+                            <span className="h-3 w-3 rounded-full bg-red-500 animate-pulse mt-1"></span>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -1455,7 +1884,7 @@ const ChatPage = () => {
               />
               <span className="absolute bottom-0 right-0 w-4 h-4 rounded-full bg-green-400 border-2 border-white"></span>
             </div>
-            <div className="flex flex-col">
+            <div className="flex flex-col flex-grow">
               <h2 className="font-semibold text-lg">
                 {userData?.userName || "Guest User"}
               </h2>
@@ -1464,6 +1893,22 @@ const ChatPage = () => {
                 Online
               </span>
             </div>
+            <button 
+              onClick={() => setNotificationSound(!notificationSound)}
+              className="p-2 bg-white bg-opacity-20 rounded-full hover:bg-opacity-30 transition-colors"
+              title={notificationSound ? "Turn off notification sounds" : "Turn on notification sounds"}
+            >
+              {notificationSound ? (
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M10 2a6 6 0 00-6 6v3.586l-.707.707A1 1 0 004 14h12a1 1 0 00.707-1.707L16 11.586V8a6 6 0 00-6-6zM10 18a3 3 0 01-3-3h6a3 3 0 01-3 3z" clipRule="evenodd" />
+                </svg>
+              ) : (
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M13 11.586V8a3 3 0 00-6 0v3.586l-.707.707A1 1 0 006 14h8a1 1 0 00.707-1.707L13 11.586z" clipRule="evenodd" />
+                  <path d="M3.293 4.293a1 1 0 011.414 0L10 9.586l5.293-5.293a1 1 0 011.414 1.414L11.414 11l5.293 5.293a1 1 0 01-1.414 1.414L10 12.414l-5.293 5.293a1 1 0 01-1.414-1.414L8.586 11 3.293 5.707a1 1 0 010-1.414z" />
+                </svg>
+              )}
+            </button>
           </div>
 
           {/* Add Filter Section to Mobile */}
@@ -1516,13 +1961,14 @@ const ChatPage = () => {
             <div className="space-y-1 px-4">
               {getFilteredUsers().map((user) => {
                 const unreadCount = getUnreadCount(user);
+                const { latestMessage } = getUnreadMessageInfo(user);
                 return (
                   <div
                     key={user._id}
                     className={`flex items-center gap-3 p-3 rounded-xl transition cursor-pointer hover:shadow-md ${
                       selectedUser?._id === user._id
                         ? "bg-gradient-to-r from-blue-50 to-indigo-50 border-l-4 border-blue-500 shadow-sm"
-                        : "hover:bg-gray-50"
+                        : unreadCount > 0 ? "bg-blue-50 border-l-2 border-red-400" : "hover:bg-gray-50"
                     }`}
                     onClick={() => {
                       setSelectedUser(user);
@@ -1538,8 +1984,9 @@ const ChatPage = () => {
                       <span className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-white ${user.online ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}></span>
                     </div>
                     <div className="flex flex-col min-w-0">
-                      <span className="text-sm font-medium text-gray-800 truncate">
+                      <span className="text-sm font-medium text-gray-800 truncate flex items-center gap-1">
                         {user.userName}
+                        {unreadCount > 0 && <span className="h-2 w-2 rounded-full bg-red-500"></span>}
                       </span>
                       <span className="text-xs text-gray-500">
                         <span className="capitalize">{user.Gender || 'Unknown'}</span> • {user.Age || '--'} yrs • 
@@ -1550,9 +1997,7 @@ const ChatPage = () => {
                     </div>
                     {unreadCount > 0 && (
                       <div className="ml-auto">
-                        <span className="bg-gradient-to-r from-blue-500 to-indigo-600 text-white text-xs rounded-full h-6 w-6 flex items-center justify-center shadow-sm">
-                          {unreadCount}
-                        </span>
+                        <span className="h-3 w-3 rounded-full bg-red-500 animate-pulse"></span>
                       </div>
                     )}
                   </div>
