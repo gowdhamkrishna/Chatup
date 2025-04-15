@@ -744,6 +744,8 @@ const ChatPage = () => {
     if (!userData) return false;
     
     try {
+      console.log("Verifying user exists in database:", userData.userName);
+      
       // Get geolocation data if not already present
       if (!userData.country || !userData.region) {
         try {
@@ -766,65 +768,172 @@ const ChatPage = () => {
         }
       }
       
-      // Check if user exists in database
-      const response = await fetch(`http://localhost:5000/check-user?userName=${userData.userName}`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
+      // Get the base URL dynamically from the current window location
+      const getBaseUrl = () => {
+        if (typeof window !== 'undefined') {
+          const { protocol, hostname, port } = window.location;
+          // If we're on localhost, use port 5000 for the API
+          if (hostname === 'localhost') {
+            return `${protocol}//${hostname}:5000`;
+          }
+          // Use the same origin for other hosts (including IP addresses)
+          return `${protocol}//${hostname}${port ? ':' + port : ''}`;
+        }
+        return '';
+      };
       
-      const data = await response.json();
-      
-      // If user doesn't exist, recreate user using socket
-      if (!data.exists) {
-        console.log("User doesn't exist in database, recreating via socket...", userData);
+      // First check if socket is connected - reconnect if needed
+      if (!socket.connected) {
+        console.log("Socket not connected, attempting to reconnect...");
+        socket.connect();
         
-        return new Promise((resolve) => {
-          // Set up one-time listener for reconnect confirmation
-          const reconnectListener = (response) => {
-            console.log("Reconnect response:", response);
-            socket.off('reconnect-confirmed', reconnectListener);
-            resolve(response.success);
-          };
+        // Wait for connection
+        await new Promise((resolve) => {
+          const timeout = setTimeout(() => resolve(false), 3000);
           
-          // Listen for confirmation
-          socket.on('reconnect-confirmed', reconnectListener);
-          
-          // Send reconnect request with all user data including location
-          socket.emit('user-reconnect', userData);
-          
-          // Set a timeout just in case we don't get a response
-          setTimeout(() => {
-            socket.off('reconnect-confirmed', reconnectListener);
-            console.warn("Reconnect timed out, attempting fallback");
-            
-            // Fallback to REST API if socket times out
-            fetch('http://localhost:5000/recreate-user', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify(userData),
-            })
-            .then(res => res.json())
-            .then(data => {
-              if (data.success) {
-                socket.emit('user-online', userData.userName);
-                resolve(true);
-              } else {
-                resolve(false);
-              }
-            })
-            .catch(err => {
-              console.error("Fallback failed:", err);
-              resolve(false);
-            });
-          }, 5000);
+          socket.once('connect', () => {
+            clearTimeout(timeout);
+            resolve(true);
+          });
         });
+        
+        if (!socket.connected) {
+          console.error("Failed to reconnect socket");
+          return false;
+        }
       }
       
-      return true;
+      // Check if user exists in database using dynamic URL
+      const apiBaseUrl = getBaseUrl();
+      console.log("Using API base URL:", apiBaseUrl);
+      
+      try {
+        const response = await fetch(`${apiBaseUrl}/check-user?userName=${userData.userName}`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        });
+        
+        const data = await response.json();
+        
+        // If user doesn't exist, recreate user using socket
+        if (!data.exists) {
+          console.log("User doesn't exist in database, recreating via socket...", userData);
+          
+          // Ensure all required fields are present
+          const completeUserData = {
+            ...userData,
+            // Ensure required fields are included even if they weren't stored
+            userName: userData.userName,
+            Age: userData.Age || 25, // Default age if missing
+            Gender: userData.Gender || 'Not specified', // Default gender if missing
+            socketId: socket.id, // Ensure the socket ID is set
+            online: true,
+            country: userData.country || 'Unknown',
+            region: userData.region || 'Unknown',
+            lastSeen: new Date().toISOString()
+          };
+          
+          // Save the complete user data to localStorage to prevent future issues
+          localStorage.setItem("guestSession", JSON.stringify(completeUserData));
+          
+          // Try socket reconnection with retry mechanism
+          return new Promise((resolve) => {
+            let attempts = 0;
+            const maxAttempts = 2;
+            
+            const attemptReconnect = () => {
+              attempts++;
+              console.log(`Reconnection attempt ${attempts} of ${maxAttempts}`);
+              
+              // Set up one-time listener for reconnect confirmation
+              const reconnectListener = (response) => {
+                console.log("Reconnect response:", response);
+                socket.off('reconnect-confirmed', reconnectListener);
+                
+                if (response.success) {
+                  // Ping again to ensure we're marked online
+                  socket.emit('user-online', userData.userName);
+                  resolve(true);
+                } else {
+                  if (attempts < maxAttempts) {
+                    setTimeout(attemptReconnect, 1000);
+                  } else {
+                    resolve(false);
+                  }
+                }
+              };
+              
+              // Listen for confirmation
+              socket.on('reconnect-confirmed', reconnectListener);
+              
+              // Send reconnect request with all user data including location
+              socket.emit('user-reconnect', completeUserData);
+              
+              // Set a timeout for this attempt
+              setTimeout(() => {
+                socket.off('reconnect-confirmed', reconnectListener);
+                
+                if (attempts < maxAttempts) {
+                  attemptReconnect();
+                } else {
+                  console.warn("Reconnect timed out, attempting fallback API call");
+                  
+                  // Fallback to REST API if socket times out
+                  fetch(`${apiBaseUrl}/recreate-user`, {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(completeUserData),
+                  })
+                  .then(res => res.json())
+                  .then(data => {
+                    if (data.success) {
+                      socket.emit('user-online', completeUserData);
+                      resolve(true);
+                    } else {
+                      console.error("User recreation failed:", data);
+                      resolve(false);
+                    }
+                  })
+                  .catch(err => {
+                    console.error("Fallback failed:", err);
+                    resolve(false);
+                  });
+                }
+              }, 3000);
+            };
+            
+            attemptReconnect();
+          });
+        }
+        
+        // User exists, send a ping to refresh the connection
+        socket.emit('ping-user', userData.userName);
+        socket.emit('user-online', userData.userName);
+        
+        return true;
+      } catch (fetchError) {
+        console.error("Error checking user in database:", fetchError);
+        
+        // Try socket-based verification as fallback
+        return new Promise((resolve) => {
+          const checkListener = (response) => {
+            socket.off('user-exists-response', checkListener);
+            resolve(response.exists);
+          };
+          
+          socket.on('user-exists-response', checkListener);
+          socket.emit('check-user-exists', { userName: userData.userName });
+          
+          setTimeout(() => {
+            socket.off('user-exists-response', checkListener);
+            resolve(false);
+          }, 3000);
+        });
+      }
     } catch (error) {
       console.error("Error verifying user exists:", error);
       return false;
@@ -900,151 +1009,164 @@ const ChatPage = () => {
     showSafetyDisclaimer('message');
 
     // Verify user exists in database before sending message
-    const userExists = await verifyUserExists();
-    if (!userExists) {
-      alert("There was an issue with your session. Please refresh the page.");
-      return;
-    }
-
-    const timestamp = new Date().toISOString();
-    let imageUrl = null;
-    
-    // Create a unique ID for this message early
-    const messageId = `${userData.userName}_${Date.now()}`;
-    
-    // Create optimistic message early
-    const createNewMessage = (imgUrl) => ({
-      user: userData.userName,
-      to: selectedUser.userName,
-      message: trimmedMessage,
-      imageUrl: imgUrl,
-      timestamp: timestamp,
-      id: messageId
-    });
-    
-    // Optimistically update UI immediately for better UX
-    const optimisticUpdate = () => {
-      const optimisticMessage = {...createNewMessage(imageUrl), read: true};
-      
-      // Update both users as online locally - this ensures UI stays consistent
-      setOnline(prev => {
-        const newUsers = [...prev];
+    try {
+      const userExists = await verifyUserExists();
+      if (!userExists) {
+        toast.error("There was an issue with your session. Attempting to reconnect...");
         
-        // Update selected user as online
-        const selectedUserIndex = newUsers.findIndex(u => u.userName === selectedUser.userName);
-        if (selectedUserIndex !== -1) {
-          newUsers[selectedUserIndex] = {
-            ...newUsers[selectedUserIndex],
-            online: true,
-            lastSeen: new Date().toISOString()
-          };
-        }
-        
-        // Also ensure current user is online
-        const currentUserIndex = newUsers.findIndex(u => u.userName === userData.userName);
-        if (currentUserIndex !== -1) {
-          newUsers[currentUserIndex] = {
-            ...newUsers[currentUserIndex],
-            online: true,
-            lastSeen: new Date().toISOString()
-          };
-        }
-        
-        return newUsers;
-      });
-      
-      // Update selected user as online specifically
-      setSelectedUser(prev => ({
-        ...prev,
-        online: true,
-        lastSeen: new Date().toISOString()
-      }));
-      
-      // Update chat window with new message
-      setOnline(prev => {
-        const newUsers = [...prev];
-        const userIndex = newUsers.findIndex(u => u.userName === selectedUser.userName);
-        
-        if (userIndex !== -1) {
-          const updatedUser = JSON.parse(JSON.stringify(newUsers[userIndex]));
-          if (!updatedUser.chatWindow) updatedUser.chatWindow = [];
-          updatedUser.chatWindow.push(optimisticMessage);
-          newUsers[userIndex] = updatedUser;
-          
-          // Also update the selectedUser reference
-          setSelectedUser(updatedUser);
-        }
-        
-        return newUsers;
-      });
-      
-      // Clear input
-      setMessage("");
-      
-      // Scroll to new message
-      setTimeout(() => {
-        messageEndRef.current?.scrollIntoView({ behavior: "smooth" });
-      }, 100);
-    };
-    
-    // Upload image if exists
-    if (imageFile) {
-      setIsUploading(true);
-      try {
-        // Create a FormData object to send the file
-        const formData = new FormData();
-        formData.append('image', imageFile);
-        
-        console.log('Uploading image:', imageFile.name);
-        
-        // Server endpoint to handle image uploads
-        const response = await fetch('http://localhost:5000/upload', {
-          method: 'POST',
-          body: formData,
-          mode: 'cors',
-          credentials: 'omit',
-          headers: {
-            'Accept': 'application/json',
-          }
-        });
-        
-        console.log('Upload response status:', response.status);
-        
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.error('Upload response error:', errorText);
-          throw new Error(`Failed to upload image: ${response.status} ${errorText}`);
-        }
-        
-        const data = await response.json();
-        console.log('Upload successful:', data);
-        imageUrl = data.imageUrl;
-        
-        // Update UI optimistically after successful upload
-        optimisticUpdate();
-        
-        // Send message to server with retry logic
-        sendMessageWithRetry(createNewMessage(imageUrl));
-      } catch (error) {
-        console.error('Error uploading image:', error);
-        alert('Failed to upload image. Please try again.');
-      } finally {
-        setIsUploading(false);
-        setImageFile(null);
-        if (fileInputRef.current) {
-          fileInputRef.current.value = '';
+        // Try to recreate the session one more time
+        const secondAttempt = await verifyUserExists();
+        if (!secondAttempt) {
+          toast.error("Session could not be restored. Please refresh the page and try again.");
+          return;
+        } else {
+          toast.success("Session restored. Continuing with your message.");
         }
       }
-    } else {
-      // No image, send text message directly
-      optimisticUpdate();
+
+      const timestamp = new Date().toISOString();
+      let imageUrl = null;
       
-      // Emit message to server with retry logic
-      sendMessageWithRetry(createNewMessage(null));
+      // Create a unique ID for this message early
+      const messageId = `${userData.userName}_${Date.now()}`;
+      
+      // Create optimistic message early
+      const createNewMessage = (imgUrl) => ({
+        user: userData.userName,
+        to: selectedUser.userName,
+        message: trimmedMessage,
+        imageUrl: imgUrl,
+        timestamp: timestamp,
+        id: messageId
+      });
+      
+      // Optimistically update UI immediately for better UX
+      const optimisticUpdate = () => {
+        const optimisticMessage = {...createNewMessage(imageUrl), read: true};
+        
+        // Update both users as online locally - this ensures UI stays consistent
+        setOnline(prev => {
+          const newUsers = [...prev];
+          
+          // Update selected user as online
+          const selectedUserIndex = newUsers.findIndex(u => u.userName === selectedUser.userName);
+          if (selectedUserIndex !== -1) {
+            newUsers[selectedUserIndex] = {
+              ...newUsers[selectedUserIndex],
+              online: true,
+              lastSeen: new Date().toISOString()
+            };
+          }
+          
+          // Also ensure current user is online
+          const currentUserIndex = newUsers.findIndex(u => u.userName === userData.userName);
+          if (currentUserIndex !== -1) {
+            newUsers[currentUserIndex] = {
+              ...newUsers[currentUserIndex],
+              online: true,
+              lastSeen: new Date().toISOString()
+            };
+          }
+          
+          return newUsers;
+        });
+        
+        // Update selected user as online specifically
+        setSelectedUser(prev => ({
+          ...prev,
+          online: true,
+          lastSeen: new Date().toISOString()
+        }));
+        
+        // Update chat window with new message
+        setOnline(prev => {
+          const newUsers = [...prev];
+          const userIndex = newUsers.findIndex(u => u.userName === selectedUser.userName);
+          
+          if (userIndex !== -1) {
+            const updatedUser = JSON.parse(JSON.stringify(newUsers[userIndex]));
+            if (!updatedUser.chatWindow) updatedUser.chatWindow = [];
+            updatedUser.chatWindow.push(optimisticMessage);
+            newUsers[userIndex] = updatedUser;
+            
+            // Also update the selectedUser reference
+            setSelectedUser(updatedUser);
+          }
+          
+          return newUsers;
+        });
+        
+        // Clear input
+        setMessage("");
+        
+        // Scroll to new message
+        setTimeout(() => {
+          messageEndRef.current?.scrollIntoView({ behavior: "smooth" });
+        }, 100);
+      };
+      
+      // Upload image if exists
+      if (imageFile) {
+        setIsUploading(true);
+        try {
+          // Create a FormData object to send the file
+          const formData = new FormData();
+          formData.append('image', imageFile);
+          
+          console.log('Uploading image:', imageFile.name);
+          
+          // Server endpoint to handle image uploads
+          const response = await fetch('http://localhost:5000/upload', {
+            method: 'POST',
+            body: formData,
+            mode: 'cors',
+            credentials: 'omit',
+            headers: {
+              'Accept': 'application/json',
+            }
+          });
+          
+          console.log('Upload response status:', response.status);
+          
+          if (!response.ok) {
+            const errorText = await response.text();
+            console.error('Upload response error:', errorText);
+            throw new Error(`Failed to upload image: ${response.status} ${errorText}`);
+          }
+          
+          const data = await response.json();
+          console.log('Upload successful:', data);
+          imageUrl = data.imageUrl;
+          
+          // Update UI optimistically after successful upload
+          optimisticUpdate();
+          
+          // Send message to server with retry logic
+          sendMessageWithRetry(createNewMessage(imageUrl));
+        } catch (error) {
+          console.error('Error uploading image:', error);
+          alert('Failed to upload image. Please try again.');
+        } finally {
+          setIsUploading(false);
+          setImageFile(null);
+          if (fileInputRef.current) {
+            fileInputRef.current.value = '';
+          }
+        }
+      } else {
+        // No image, send text message directly
+        optimisticUpdate();
+        
+        // Emit message to server with retry logic
+        sendMessageWithRetry(createNewMessage(null));
+      }
+      
+      // Focus back on input
+      inputRef.current?.focus();
+    } catch (error) {
+      console.error("Error sending message:", error);
+      toast.error("Failed to send message. Please try again.");
     }
-    
-    // Focus back on input
-    inputRef.current?.focus();
   };
 
   // Add retry logic for sending messages
@@ -1838,6 +1960,35 @@ const ChatPage = () => {
     };
   }, [userData]);
 
+  // Setup proper viewport height for mobile devices
+  useEffect(() => {
+    // Fix for mobile viewport height issues
+    const setMobileHeight = () => {
+      // First we get the viewport height and we multiply it by 1% to get a value for a vh unit
+      let vh = window.innerHeight * 0.01;
+      // Then we set the value in the --vh custom property to the root of the document
+      document.documentElement.style.setProperty('--vh', `${vh}px`);
+    };
+    
+    // Run on initial load and when window is resized
+    setMobileHeight();
+    window.addEventListener('resize', setMobileHeight);
+    
+    // Auto open sidebar on mobile if no user selected
+    if (window.innerWidth < 768 && !selectedUser) {
+      setTimeout(() => {
+        const mobileSidebar = document.getElementById('mobileSidebar');
+        if (mobileSidebar && !mobileSidebar.classList.contains('translate-x-0')) {
+          mobileSidebar.classList.add('translate-x-0');
+        }
+      }, 500);
+    }
+    
+    return () => {
+      window.removeEventListener('resize', setMobileHeight);
+    };
+  }, [selectedUser]);
+
   if (isLoading) {
     return (
       <div className="flex h-screen items-center justify-center bg-gray-50">
@@ -1915,7 +2066,31 @@ const ChatPage = () => {
               max-width: 90% !important;
               max-height: 50vh !important;
             }
+            
+            /* Mobile sidebar animation */
+            #mobileSidebar.translate-x-0 {
+              transform: translateX(0%);
+              box-shadow: 0 0 15px rgba(0, 0, 0, 0.1);
+            }
+            
+            /* Pulse animation for mobile menu button */
+            .pulse-animation {
+              animation: pulse 2s infinite;
+            }
           }
+          
+          @keyframes pulse {
+            0% {
+              box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7);
+            }
+            70% {
+              box-shadow: 0 0 0 10px rgba(59, 130, 246, 0);
+            }
+            100% {
+              box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+            }
+          }
+          
           @keyframes bounce-once {
             0%, 100% {
               transform: translateY(0);
@@ -2133,7 +2308,7 @@ const ChatPage = () => {
         {/* Mobile menu button - only appears on small screens */}
         <div className="md:hidden fixed top-4 left-4 z-10">
           <button 
-            className="p-3 bg-white rounded-full shadow-md text-blue-600 hover:bg-blue-50 transition-colors"
+            className="p-3 bg-blue-500 text-white rounded-full shadow-md hover:bg-blue-600 transition-colors pulse-animation"
             onClick={() => document.getElementById('mobileSidebar').classList.toggle('translate-x-0')}
           >
             <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -2143,7 +2318,7 @@ const ChatPage = () => {
         </div>
 
         {/* Mobile sidebar - hidden by default */}
-        <div id="mobileSidebar" className="md:hidden fixed inset-y-0 left-0 transform -translate-x-full w-72 transition duration-300 ease-in-out z-20 bg-white shadow-xl rounded-tr-3xl rounded-br-3xl">
+        <div id="mobileSidebar" className="md:hidden fixed inset-y-0 left-0 transform -translate-x-full w-72 transition duration-300 ease-in-out z-30 bg-white shadow-xl rounded-tr-3xl rounded-br-3xl overflow-auto h-full">
           {/* Close button */}
           <button 
             className="absolute top-4 right-4 p-2 rounded-full text-gray-500 hover:bg-gray-100 transition-colors"
@@ -2311,8 +2486,11 @@ const ChatPage = () => {
                 <div className="flex justify-center">
                   <button
                     onClick={() => document.getElementById('mobileSidebar').classList.toggle('translate-x-0')}
-                    className="md:hidden px-5 py-2 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-full shadow-md hover:shadow-lg transition-all"
+                    className="md:hidden px-5 py-3 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-full shadow-lg hover:shadow-xl transition-all flex items-center animate-pulse"
                   >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                    </svg>
                     Show Online Users
                   </button>
                 </div>
@@ -2355,13 +2533,16 @@ const ChatPage = () => {
                   <button 
                     onClick={startVideoCall}
                     disabled={!selectedUser?.online}
-                    className="px-4 py-2.5 bg-gradient-to-r from-green-500 to-teal-500 text-white rounded-lg shadow-md hover:from-green-600 hover:to-teal-600 transition-all transform hover:scale-105 duration-200 relative group"
+                    className={`px-4 py-2.5 rounded-lg shadow-md transition-all transform hover:scale-105 duration-200 relative group ${
+                      selectedUser?.online 
+                        ? 'bg-gradient-to-r from-green-500 to-teal-500 text-white hover:from-green-600 hover:to-teal-600' 
+                        : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                    }`}
                   >
-                    <svg className="w-5 h-5 inline-block mr-1 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <svg className="w-5 h-5 inline-block mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
                     </svg>
-                    <span className="font-medium">Video Call</span>
-                    <span className="absolute -top-2 -right-2 bg-white text-green-600 text-xs font-bold rounded-full h-5 w-5 flex items-center justify-center shadow-sm opacity-0 group-hover:opacity-100 transition-opacity">V</span>
+                    <span className="font-medium md:inline hidden">Video Call</span>
                   </button>
                   
                   {/* Mobile back button */}
@@ -2453,7 +2634,7 @@ const ChatPage = () => {
                         >
                           <EmojiPicker 
                             onEmojiClick={handleEmojiClick}
-                            width={window.innerWidth < 768 ? 320 : 300}
+                            width={window.innerWidth < 768 ? window.innerWidth - 40 : 300}
                             height={window.innerWidth < 768 ? 350 : 400}
                             previewConfig={{
                               showPreview: false
@@ -2502,6 +2683,7 @@ const ChatPage = () => {
                         onChange={handleFileChange}
                         accept="image/*"
                         className="hidden"
+                        ref={fileInputRef}
                       />
                       <button
                         type="submit"

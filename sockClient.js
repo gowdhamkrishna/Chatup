@@ -1,19 +1,27 @@
 // client.js
 import { io } from "socket.io-client";
 
-// Helper to detect if we're on mobile
+// Simple function to detect mobile devices
 const isMobileDevice = () => {
   if (typeof window === 'undefined') return false;
-  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
-    window.navigator.userAgent
-  );
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(window.navigator.userAgent);
 };
 
 // Get the current hostname and port for dynamic connections
 const getServerUrl = () => {
-  // Use window.location.hostname to get the current host (works on both desktop and mobile)
-  const hostname = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-  // Use port 5000 for the socket server
+  // Check if we're in a browser environment
+  if (typeof window === 'undefined') return 'http://localhost:5000';
+  
+  // For mobile devices, check if there's a saved custom server address in localStorage
+  if (isMobileDevice()) {
+    const savedServerAddress = localStorage.getItem('customServerAddress');
+    if (savedServerAddress && savedServerAddress.includes(':')) {
+      return `http://${savedServerAddress}`;
+    }
+  }
+  
+  // Otherwise use the current hostname with port 5000
+  const hostname = window.location.hostname;
   return `http://${hostname}:5000`;
 };
 
@@ -267,11 +275,63 @@ socket.on('session-expired', () => {
   // Clear session data
   if (typeof window !== 'undefined') {
     localStorage.removeItem('lastActive');
-    // Don't clear the entire guestSession, let the app handle that
+    // Don't clear the entire guestSession immediately
     
-    // Redirect to login if needed
+    // First attempt to reconnect if there's a valid session
+    try {
+      const userData = localStorage.getItem('guestSession');
+      if (userData) {
+        const parsedData = JSON.parse(userData);
+        
+        // Emit reconnect event with current user data
+        socket.emit('user-reconnect', {
+          ...parsedData,
+          lastSeen: new Date().toISOString()
+        });
+        
+        // Set a short timeout to see if reconnect succeeds
+        setTimeout(() => {
+          // If we're still on a page that requires auth and the session failed to restore,
+          // redirect to login
+          if (window.location.pathname !== '/' && !socket.connected) {
+            localStorage.removeItem('guestSession');
+            window.location.href = '/';
+          }
+        }, 3000);
+        
+        return;
+      }
+    } catch (e) {
+      console.error("Error processing session data:", e);
+    }
+    
+    // If we got here, we couldn't reconnect, so redirect
     if (window.location.pathname !== '/') {
       window.location.href = '/';
+    }
+  }
+});
+
+// Add a specific handler for user-not-found that attempts recreation
+socket.on('user-not-found', () => {
+  logMessage('warn', 'User not found in database');
+  
+  if (typeof window !== 'undefined') {
+    try {
+      const userData = localStorage.getItem('guestSession');
+      if (userData) {
+        const parsedData = JSON.parse(userData);
+        
+        // Emit reconnect event with current user data
+        socket.emit('user-reconnect', {
+          ...parsedData,
+          lastSeen: new Date().toISOString(),
+          socketId: socket.id,
+          online: true
+        });
+      }
+    } catch (e) {
+      console.error("Error processing session data:", e);
     }
   }
 });

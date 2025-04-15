@@ -1479,9 +1479,188 @@ io.on('connection', (socket) => {
       
       console.log(`User successfully reconnected: ${userName} (Socket ID: ${socket.id})`);
     } catch (error) {
-      console.error(`Error handling user-reconnect for ${userData?.userName}:`, error);
-      socket.emit('reconnect-confirmed', { success: false, error: 'Failed to reconnect' });
-      performanceStats.errors++;
+      console.error('Error handling user-reconnect:', error);
+      socket.emit('reconnect-confirmed', { success: false, error: error.message });
+    }
+  });
+
+  // Add socket event to check if a user exists (fallback for REST API)
+  socket.on('check-user-exists', async (data) => {
+    try {
+      if (!data || !data.userName) {
+        socket.emit('user-exists-response', { exists: false, error: 'No username provided' });
+        return;
+      }
+      
+      const { userName } = data;
+      console.log(`Socket check if user exists: ${userName}`);
+      
+      const exists = await checkUser({ userName });
+      socket.emit('user-exists-response', { exists });
+      
+      // If user doesn't exist, notify client
+      if (!exists) {
+        socket.emit('user-not-found', { userName });
+      }
+    } catch (error) {
+      console.error('Error checking if user exists:', error);
+      socket.emit('user-exists-response', { exists: false, error: error.message });
+    }
+  });
+
+  // Handle start-call event - initial call request
+  socket.on('start-call', async (data) => {
+    console.log(`Call request from ${data?.from} to ${data?.to}`);
+    
+    if (!data || !data.from || !data.to) {
+      console.error('Invalid call data:', data);
+      return;
+    }
+    
+    try {
+      // Find the recipient user
+      const recipient = await User.findOne({ userName: data.to });
+      
+      // Check if recipient exists and is online
+      if (recipient && recipient.socketId) {
+        console.log(`Forwarding call request to ${data.to} at socket ${recipient.socketId}`);
+        
+        // Forward the call request to the recipient
+        io.to(recipient.socketId).emit('call-user', {
+          from: data.from,
+          to: data.to,
+          callType: data.callType || 'video'
+        });
+      } else {
+        // Recipient not found or not online
+        const caller = await User.findOne({ userName: data.from });
+        if (caller && caller.socketId) {
+          io.to(caller.socketId).emit('user-not-available', {
+            caller: data.from,
+            callee: data.to
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Error handling start-call:', error);
+    }
+  });
+
+  // Handle call-user event (secondary call request from VideoChat component)
+  socket.on('call-user', async (data) => {
+    console.log(`Call-user event from ${data?.from} to ${data?.to}`);
+    
+    if (!data || !data.from || !data.to) return;
+    
+    try {
+      // Find the recipient user
+      const recipient = await User.findOne({ userName: data.to });
+      
+      // Forward the call request if recipient is online
+      if (recipient && recipient.socketId) {
+        io.to(recipient.socketId).emit('call-user', {
+          from: data.from,
+          to: data.to
+        });
+      } else {
+        // Recipient not found or not online
+        io.to(socket.id).emit('user-not-available', {
+          caller: data.from,
+          callee: data.to
+        });
+      }
+    } catch (error) {
+      console.error('Error handling call-user:', error);
+    }
+  });
+
+  // Handle call-signal event (WebRTC signaling)
+  socket.on('call-signal', async (data) => {
+    console.log(`Call signal from ${data?.from} to ${data?.to}`);
+    
+    if (!data || !data.from || !data.to || !data.signalData) return;
+    
+    try {
+      // Find the recipient user
+      const recipient = await User.findOne({ userName: data.to });
+      
+      // Forward the signaling data if recipient is online
+      if (recipient && recipient.socketId) {
+        io.to(recipient.socketId).emit('call-signal', {
+          from: data.from,
+          to: data.to,
+          signalData: data.signalData
+        });
+      }
+    } catch (error) {
+      console.error('Error handling call-signal:', error);
+    }
+  });
+
+  // Handle call-accepted event
+  socket.on('call-accepted', async (data) => {
+    console.log(`Call accepted by ${data?.from} for ${data?.to}`);
+    
+    if (!data || !data.from || !data.to || !data.signalData) return;
+    
+    try {
+      // Find the caller
+      const caller = await User.findOne({ userName: data.to });
+      
+      // Forward the accept response if caller is online
+      if (caller && caller.socketId) {
+        io.to(caller.socketId).emit('call-accepted', {
+          from: data.from,
+          to: data.to,
+          signalData: data.signalData
+        });
+      }
+    } catch (error) {
+      console.error('Error handling call-accepted:', error);
+    }
+  });
+
+  // Handle call-rejected event
+  socket.on('call-rejected', async (data) => {
+    console.log(`Call rejected by ${data?.from} for ${data?.to}`);
+    
+    if (!data || !data.from || !data.to) return;
+    
+    try {
+      // Find the caller
+      const caller = await User.findOne({ userName: data.to });
+      
+      // Forward the rejection if caller is online
+      if (caller && caller.socketId) {
+        io.to(caller.socketId).emit('call-rejected', {
+          from: data.from,
+          to: data.to
+        });
+      }
+    } catch (error) {
+      console.error('Error handling call-rejected:', error);
+    }
+  });
+
+  // Handle call-ended event
+  socket.on('call-ended', async (data) => {
+    console.log(`Call ended by ${data?.from} to ${data?.to}`);
+    
+    if (!data || !data.from || !data.to) return;
+    
+    try {
+      // Find the other participant
+      const recipient = await User.findOne({ userName: data.to });
+      
+      // Forward the end call event if recipient is online
+      if (recipient && recipient.socketId) {
+        io.to(recipient.socketId).emit('call-ended', {
+          from: data.from,
+          to: data.to
+        });
+      }
+    } catch (error) {
+      console.error('Error handling call-ended:', error);
     }
   });
 
