@@ -1,0 +1,41 @@
+{
+  "name": "chat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "server": "nodemon server.js",
+    "dev:all": "concurrently \"npm run dev\" \"npm run server\""
+  },
+  "dependencies": {
+    "compression": "^1.8.0",
+    "cors": "^2.8.5",
+    "emoji-picker-react": "^4.12.2",
+    "express": "^5.1.0",
+    "lucide-react": "^0.487.0",
+    "mongoose": "^8.13.2",
+    "multer": "^1.4.5-lts.2",
+    "next": "15.2.4",
+    "peerjs": "^1.5.4",
+    "prop-types": "^15.8.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-hot-toast": "^2.5.2",
+    "react-icons": "^5.5.0",
+    "react-toastify": "^11.0.5",
+    "simple-peer": "^9.11.1",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
+    "socketio": "^1.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "concurrently": "^8.2.2",
+    "nodemon": "^3.0.1",
+    "tailwindcss": "^4"
+  }
+}
