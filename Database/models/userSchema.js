@@ -17,6 +17,8 @@ const userSchema = new mongoose.Schema({
   userName: { type: String, required: true, unique: true },
   Age: { type: Number, required: true },
   Gender: { type: String, required: true },
+  country: { type: String, default: 'Unknown' },
+  region: { type: String, default: 'Unknown' },
   socketId: { type: String, required: true },
   chatWindow: { type: [messageSchema], default: [] },
   lastSeen: { type: Date, default: Date.now, index: { expires: 3600 } },

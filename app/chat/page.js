@@ -17,6 +17,7 @@ const ChatPage = () => {
   const [onlineUsers, setOnline] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [genderFilter, setGenderFilter] = useState('all');
+  const [regionFilter, setRegionFilter] = useState('all'); // Add state for region filter
   
   // Add new state variables for emoji picker and image upload
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -691,14 +692,51 @@ const ChatPage = () => {
     `)}`;
   };
 
-  // Filter users based on gender
+  // Filter and sort users based on gender and region
   const getFilteredUsers = () => {
-    if (genderFilter === 'all') {
-      return onlineUsers;
+    // First apply gender filter
+    let filteredUsers = onlineUsers;
+    if (genderFilter !== 'all') {
+      filteredUsers = filteredUsers.filter(user => 
+        user.Gender && user.Gender.toLowerCase() === genderFilter.toLowerCase()
+      );
     }
-    return onlineUsers.filter(user => 
-      user.Gender && user.Gender.toLowerCase() === genderFilter.toLowerCase()
-    );
+    
+    // Then apply region filter if not set to 'all'
+    if (regionFilter !== 'all') {
+      filteredUsers = filteredUsers.filter(user => 
+        user.region && user.region.toLowerCase() === regionFilter.toLowerCase()
+      );
+    }
+    
+    // If no region filter is applied, sort users to prioritize those from the same region as current user
+    if (regionFilter === 'all' && userData?.region && userData.region !== 'Unknown') {
+      filteredUsers.sort((a, b) => {
+        // Users from same region as current user go first
+        const aFromSameRegion = a.region && a.region.toLowerCase() === userData.region.toLowerCase();
+        const bFromSameRegion = b.region && b.region.toLowerCase() === userData.region.toLowerCase();
+        
+        if (aFromSameRegion && !bFromSameRegion) return -1;
+        if (!aFromSameRegion && bFromSameRegion) return 1;
+        
+        // Users from same country but different region go next
+        if (userData.country && userData.country !== 'Unknown') {
+          const aFromSameCountry = a.country && a.country.toLowerCase() === userData.country.toLowerCase();
+          const bFromSameCountry = b.country && b.country.toLowerCase() === userData.country.toLowerCase();
+          
+          if (aFromSameCountry && !bFromSameCountry) return -1;
+          if (!aFromSameCountry && bFromSameCountry) return 1;
+        }
+        
+        // Then prioritize online users
+        if (a.online && !b.online) return -1;
+        if (!a.online && b.online) return 1;
+        
+        return 0;
+      });
+    }
+    
+    return filteredUsers;
   };
 
   // Add this function before handleSendMessage
@@ -706,6 +744,28 @@ const ChatPage = () => {
     if (!userData) return false;
     
     try {
+      // Get geolocation data if not already present
+      if (!userData.country || !userData.region) {
+        try {
+          const geoResponse = await fetch('https://ipapi.co/json/');
+          const geoData = await geoResponse.json();
+          
+          // Update userData with location information
+          userData.country = geoData.country_name || 'Unknown';
+          userData.region = geoData.region || 'Unknown';
+          
+          // Save updated userData to localStorage
+          localStorage.setItem("guestSession", JSON.stringify(userData));
+          
+          console.log(`Updated location data: ${userData.country}, ${userData.region}`);
+        } catch (geoError) {
+          console.error("Error getting location data:", geoError);
+          // Default values if location fetch fails
+          userData.country = userData.country || 'Unknown';
+          userData.region = userData.region || 'Unknown';
+        }
+      }
+      
       // Check if user exists in database
       const response = await fetch(`http://localhost:5000/check-user?userName=${userData.userName}`, {
         method: 'GET',
@@ -731,7 +791,7 @@ const ChatPage = () => {
           // Listen for confirmation
           socket.on('reconnect-confirmed', reconnectListener);
           
-          // Send reconnect request with all user data
+          // Send reconnect request with all user data including location
           socket.emit('user-reconnect', userData);
           
           // Set a timeout just in case we don't get a response
@@ -1564,13 +1624,38 @@ const ChatPage = () => {
       console.log("Socket reconnected, updating user status");
       if (userData?.userName) {
         try {
+          // Make sure location data is available
+          if (!userData.country || !userData.region) {
+            try {
+              const geoResponse = await fetch('https://ipapi.co/json/');
+              const geoData = await geoResponse.json();
+              
+              // Update userData with location information
+              userData.country = geoData.country_name || 'Unknown';
+              userData.region = geoData.region || 'Unknown';
+              
+              // Save updated userData to localStorage
+              localStorage.setItem("guestSession", JSON.stringify(userData));
+              
+              console.log(`Updated location on reconnect: ${userData.country}, ${userData.region}`);
+            } catch (geoError) {
+              console.error("Error getting location on reconnect:", geoError);
+              userData.country = userData.country || 'Unknown';
+              userData.region = userData.region || 'Unknown';
+            }
+          }
+          
           // Check if user exists in database before re-establishing presence
           const userExists = await verifyUserExists();
           
           if (userExists) {
             console.log("User verified after reconnection, re-establishing presence");
-            // Reestablish our online presence
-            socket.emit('user-online', userData.userName);
+            // Reestablish our online presence with country and region
+            socket.emit('user-online', {
+              userName: userData.userName,
+              country: userData.country,
+              region: userData.region
+            });
             
             // Force refresh data
             getOnlineData(true);
@@ -1582,7 +1667,11 @@ const ChatPage = () => {
         } catch (error) {
           console.error("Error during reconnection:", error);
           // Still try to reconnect
-          socket.emit('user-online', userData.userName);
+          socket.emit('user-online', {
+            userName: userData.userName,
+            country: userData.country || 'Unknown',
+            region: userData.region || 'Unknown'
+          });
           getOnlineData(true);
         }
       }
@@ -1831,6 +1920,11 @@ const ChatPage = () => {
                             </>
                           )}
                         </span>
+                        {(user.country && user.country !== 'Unknown') && (
+                          <span className="text-xs italic text-gray-500 truncate">
+                            {user.country}{user.region && user.region !== 'Unknown' ? `, ${user.region}` : ''}
+                          </span>
+                        )}
                       </div>
                       {unreadCount > 0 && (
                         <div className="ml-auto flex items-center">
@@ -1994,6 +2088,11 @@ const ChatPage = () => {
                           ? <span className="text-green-600 font-medium"> Online</span> 
                           : ` Last seen: ${formatLastSeen(user.lastSeen)}`}
                       </span>
+                      {(user.country && user.country !== 'Unknown') && (
+                        <span className="text-xs italic text-gray-500 truncate">
+                          {user.country}{user.region && user.region !== 'Unknown' ? `, ${user.region}` : ''}
+                        </span>
+                      )}
                     </div>
                     {unreadCount > 0 && (
                       <div className="ml-auto">
@@ -2058,6 +2157,11 @@ const ChatPage = () => {
                           </span> 
                         : `Last seen: ${formatLastSeen(selectedUser.lastSeen)}`}
                     </p>
+                    {(selectedUser.country && selectedUser.country !== 'Unknown') && (
+                      <p className="text-xs italic text-gray-500">
+                        {selectedUser.country}{selectedUser.region && selectedUser.region !== 'Unknown' ? `, ${selectedUser.region}` : ''}
+                      </p>
+                    )}
                   </div>
                 </div>
                 <div className="flex items-center space-x-3">

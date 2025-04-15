@@ -17,6 +17,8 @@ export default function LoginPage() {
       userName: '',
       Age: '',
       Gender: '',
+      country: '',
+      region: ''
     });
     const [usernameError, setUsernameError] = useState('');
     const [showLoader, setLoader] = useState(false);
@@ -190,6 +192,18 @@ export default function LoginPage() {
       }
     }, []);
   
+    // Auto-detect location on component load
+    useEffect(() => {
+      if ((!formData.country || !formData.region) && connectionStatus === 'connected') {
+        // Wait a bit before attempting to detect location to not interfere with other initialization
+        const timeoutId = setTimeout(() => {
+          autoDetectLocation();
+        }, 1000);
+        
+        return () => clearTimeout(timeoutId);
+      }
+    }, [connectionStatus]);
+  
     const validateUsername = (username) => {
       if (!username.trim()) return "";
       if (username.length < MIN_USERNAME_LENGTH) {
@@ -272,6 +286,8 @@ export default function LoginPage() {
         ...formData,
         userName: formData.userName.trim(),
         Age: Number(formData.Age),
+        country: formData.country.trim() || 'Unknown',
+        region: formData.region.trim() || 'Unknown',
         online: true,
         lastSeen: new Date().toISOString()
       };
@@ -377,6 +393,30 @@ export default function LoginPage() {
         console.error('Server health check failed:', error);
         setConnectionStatus('error');
         toast.error(`Connection test failed: ${error.message}`);
+      }
+    };
+
+    // Function to auto-detect location
+    const autoDetectLocation = async () => {
+      try {
+        toast.info("Detecting your location...");
+        const response = await fetch('https://ipapi.co/json/');
+        if (!response.ok) {
+          throw new Error('Could not detect location');
+        }
+        
+        const data = await response.json();
+        
+        setFormData(prev => ({
+          ...prev,
+          country: data.country_name || '',
+          region: data.region || ''
+        }));
+        
+        toast.success(`Location detected: ${data.country_name}${data.region ? `, ${data.region}` : ''}`);
+      } catch (error) {
+        console.error('Error detecting location:', error);
+        toast.error('Could not detect your location. Please enter manually.');
       }
     };
 
@@ -552,6 +592,64 @@ export default function LoginPage() {
                   <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none text-gray-400">
                     <FiArrowDown className="h-5 w-5" />
                   </div>
+                </div>
+              </div>
+
+              <div>
+                <label htmlFor="country" className="block text-sm font-semibold text-gray-700 mb-3">
+                  Country
+                </label>
+                <div className="relative flex">
+                  <div className="relative flex-grow">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                    </div>
+                    <input
+                      type="text"
+                      id="country"
+                      name="country"
+                      value={formData.country}
+                      onChange={handleChange}
+                      className="w-full pl-10 pr-4 py-3.5 rounded-xl border-2 border-gray-200 focus:border-blue-500 focus:ring-0 transition-all duration-200 outline-none shadow-sm placeholder-gray-400"
+                      placeholder="Your country (optional)"
+                    />
+                  </div>
+                  <button 
+                    type="button" 
+                    onClick={autoDetectLocation}
+                    className="ml-2 px-3 py-2 bg-blue-100 text-blue-700 rounded-xl hover:bg-blue-200 transition-colors"
+                    title="Auto-detect location"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label htmlFor="region" className="block text-sm font-semibold text-gray-700 mb-3">
+                  Region/State
+                </label>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                  </div>
+                  <input
+                    type="text"
+                    id="region"
+                    name="region"
+                    value={formData.region}
+                    onChange={handleChange}
+                    className="w-full pl-10 pr-4 py-3.5 rounded-xl border-2 border-gray-200 focus:border-blue-500 focus:ring-0 transition-all duration-200 outline-none shadow-sm placeholder-gray-400"
+                    placeholder="Your region/state (optional)"
+                  />
                 </div>
               </div>
             </div>

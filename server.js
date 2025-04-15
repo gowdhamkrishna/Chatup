@@ -175,16 +175,25 @@ app.post('/recreate-user', async (req, res) => {
       return res.status(200).json({ success: true, message: 'User already exists' });
     }
     
-    // Recreate the user in the database
-    const newUser = await saveUser({
+    // Ensure country and region are included
+    const userDataWithLocation = {
       ...userData,
+      country: userData.country || 'Unknown',
+      region: userData.region || 'Unknown',
       lastSeen: new Date(), // Update the last seen timestamp
-    });
+    };
     
-    console.log(`User recreated: ${userData.userName}`);
+    // Recreate the user in the database
+    const newUser = await saveUser(userDataWithLocation);
+    
+    console.log(`User recreated: ${userData.userName} (${userData.country}, ${userData.region})`);
     
     // Notify other clients that this user is back online
-    io.emit('user-online', { userName: userData.userName });
+    io.emit('user-online', { 
+      userName: userData.userName,
+      country: userData.country,
+      region: userData.region
+    });
     
     return res.status(201).json({ 
       success: true, 
@@ -512,8 +521,13 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('user-online', async (userName) => {
+  socket.on('user-online', async (userNameOrData) => {
     try {
+      // Handle both formats: string userName or object with userName property
+      const userName = typeof userNameOrData === 'string' ? userNameOrData : userNameOrData?.userName;
+      const country = typeof userNameOrData === 'object' ? (userNameOrData?.country || 'Unknown') : 'Unknown';
+      const region = typeof userNameOrData === 'object' ? (userNameOrData?.region || 'Unknown') : 'Unknown';
+      
       if (!userName) return;
       
       // Check if user exists in database
@@ -531,22 +545,38 @@ io.on('connection', (socket) => {
       activeUsers.set(userName, socket.id);
       performanceStats.connections++;
       
-      // Update last seen timestamp
-      await updateLastSeen(userName);
+      // Update last seen timestamp and location if provided
+      await User.findOneAndUpdate(
+        { userName },
+        { 
+          lastSeen: new Date(),
+          ...(country !== 'Unknown' && { country }),
+          ...(region !== 'Unknown' && { region })
+        }
+      );
       
-      // Broadcast to all users
-      io.emit('user-online', { userName });
+      // Broadcast to all users with country and region
+      io.emit('user-online', { 
+        userName,
+        country,
+        region
+      });
       
       // Log connection
-      console.log(`User Online: ${userName} (Socket ID: ${socket.id})`);
+      console.log(`User Online: ${userName} (${country}, ${region}) (Socket ID: ${socket.id})`);
     } catch (error) {
-      console.error(`Error handling user-online for ${userName}:`, error);
+      console.error(`Error handling user-online for ${typeof userNameOrData === 'string' ? userNameOrData : userNameOrData?.userName}:`, error);
       performanceStats.errors++;
     }
   });
 
-  socket.on('ping-user', async (userName) => {
+  socket.on('ping-user', async (userNameOrData) => {
     try {
+      // Handle both formats: string userName or object with userName property
+      const userName = typeof userNameOrData === 'string' ? userNameOrData : userNameOrData?.userName;
+      const country = typeof userNameOrData === 'object' ? (userNameOrData?.country || 'Unknown') : 'Unknown';
+      const region = typeof userNameOrData === 'object' ? (userNameOrData?.region || 'Unknown') : 'Unknown';
+      
       if (!userName) return;
       
       // Check if user exists in database first
@@ -559,14 +589,22 @@ io.on('connection', (socket) => {
         return;
       }
       
-      await updateLastSeen(userName);
+      // Update last seen timestamp and location if provided
+      await User.findOneAndUpdate(
+        { userName },
+        { 
+          lastSeen: new Date(),
+          ...(country !== 'Unknown' && { country }),
+          ...(region !== 'Unknown' && { region })
+        }
+      );
       
       // Update active users map
       if (!activeUsers.has(userName)) {
         activeUsers.set(userName, socket.id);
       }
     } catch (error) {
-      console.error(`Error handling ping for ${userName}:`, error);
+      console.error(`Error handling ping for ${typeof userNameOrData === 'string' ? userNameOrData : userNameOrData?.userName}:`, error);
     }
   });
 
@@ -1391,20 +1429,35 @@ io.on('connection', (socket) => {
       if (!userData || !userData.userName) return;
       
       const userName = userData.userName;
-      console.log(`User attempting reconnection: ${userName}`);
+      console.log(`User attempting reconnection: ${userName} from ${userData.country || 'Unknown'}, ${userData.region || 'Unknown'}`);
       
       // Check if user exists in database
       const exists = await checkUser({ userName });
       
       if (!exists) {
         console.log(`User ${userName} doesn't exist in database, recreating...`);
-        // Recreate user in database
+        // Recreate user in database with location data
         await saveUser({
           ...userData,
+          country: userData.country || 'Unknown',
+          region: userData.region || 'Unknown',
           lastSeen: new Date(),
         });
         
-        console.log(`User ${userName} recreated in database`);
+        console.log(`User ${userName} recreated in database with location: ${userData.country || 'Unknown'}, ${userData.region || 'Unknown'}`);
+      } else {
+        // Update existing user with new location if provided
+        if (userData.country || userData.region) {
+          await User.findOneAndUpdate(
+            { userName },
+            { 
+              country: userData.country || 'Unknown',
+              region: userData.region || 'Unknown',
+              lastSeen: new Date()
+            }
+          );
+          console.log(`Updated location for ${userName}: ${userData.country || 'Unknown'}, ${userData.region || 'Unknown'}`);
+        }
       }
       
       // Update user in active users list
@@ -1414,8 +1467,12 @@ io.on('connection', (socket) => {
       // Update last seen timestamp
       await updateLastSeen(userName);
       
-      // Broadcast to all users
-      io.emit('user-online', { userName });
+      // Broadcast to all users with country and region
+      io.emit('user-online', { 
+        userName,
+        country: userData.country || 'Unknown',
+        region: userData.region || 'Unknown'
+      });
       
       // Confirm successful reconnection
       socket.emit('reconnect-confirmed', { success: true });
