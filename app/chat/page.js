@@ -18,7 +18,6 @@ const ChatPage = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [genderFilter, setGenderFilter] = useState('all');
   const [regionFilter, setRegionFilter] = useState('all'); // Add state for region filter
-  const [blurredImages, setBlurredImages] = useState({}); // Track which images should be blurred
   
   // Add new state variables for emoji picker and image upload
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -461,36 +460,6 @@ const ChatPage = () => {
       if (messageData.to !== userData.userName) {
         console.log('Ignoring message not meant for this user');
         return;
-      }
-      
-      // Check if this is an image message, and show policy notification
-      if (messageData.imageUrl) {
-        // Set the image to be blurred by default
-        setBlurredImages(prev => ({
-          ...prev,
-          [messageData.id]: true
-        }));
-        
-        toast((t) => (
-          <div className="p-3 bg-gray-100 border-l-4 border-red-500 mb-2">
-            <h3 className="font-bold text-red-600 mb-1">⚠️ Image Safety Notice</h3>
-            <p className="text-sm mb-2">You received an image from <span className="font-semibold">{messageData.user}</span>:</p>
-            <ul className="text-xs list-disc pl-4 mb-2">
-              <li className="font-semibold">DO NOT view if you suspect explicit content</li>
-              <li>This platform is NOT responsible for the content of images</li>
-              <li>Exercise caution when viewing images from strangers</li>
-              <li>Report inappropriate content immediately</li>
-            </ul>
-            <div className="flex justify-end gap-2 mt-2">
-              <button 
-                onClick={() => toast.dismiss(t.id)}
-                className="bg-blue-500 text-white px-2 py-1 rounded text-xs"
-              >
-                I understand
-              </button>
-            </div>
-          </div>
-        ), { duration: 8000 });
       }
       
       // Optimize state updates for better performance
@@ -1020,37 +989,6 @@ const ChatPage = () => {
     
     // Upload image if exists
     if (imageFile) {
-      // Show a specific warning for image sharing
-      toast((t) => (
-        <div className="p-3 bg-yellow-50 border-l-4 border-yellow-500">
-          <h3 className="font-bold text-red-600 mb-1">⚠️ Important Image Notice</h3>
-          <p className="text-sm mb-2">You are about to share an image:</p>
-          <ul className="text-xs list-disc pl-4 mb-2">
-            <li className="font-bold text-red-600">DO NOT share personal photos or explicit content</li>
-            <li>The platform is NOT responsible for any consequences of sharing inappropriate content</li>
-            <li>Images are stored on servers and cannot be fully deleted</li>
-            <li>Other users may download or screenshot your images</li>
-          </ul>
-          <div className="flex justify-end gap-2 mt-2">
-            <button 
-              onClick={() => {
-                setImageFile(null);
-                toast.dismiss(t.id);
-              }}
-              className="bg-gray-200 text-gray-800 px-2 py-1 rounded text-xs"
-            >
-              Cancel
-            </button>
-            <button 
-              onClick={() => toast.dismiss(t.id)}
-              className="bg-blue-500 text-white px-2 py-1 rounded text-xs"
-            >
-              Proceed Anyway
-            </button>
-          </div>
-        </div>
-      ), { duration: 7000 });
-      
       setIsUploading(true);
       try {
         // Create a FormData object to send the file
@@ -1267,50 +1205,13 @@ const ChatPage = () => {
             <p className="text-sm">{msg.message}</p>
             {msg.imageUrl && (
               <div className="mt-2 mb-2">
-                {!isMe && (
-                  <div className="bg-gray-100 p-2 rounded-t-lg border-l-4 border-red-500 text-xs mb-1">
-                    <div className="flex items-center">
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-red-500 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                      </svg>
-                      <p className="font-bold text-red-600">Image Safety Notice</p>
-                    </div>
-                    <p>This platform is not responsible for image content.</p>
-                    <p className="font-semibold">Do not view if it may be personal or explicit content.</p>
-                  </div>
-                )}
-                {(!isMe && blurredImages[msg.id]) ? (
-                  <div className="relative">
-                    <div className="absolute inset-0 bg-gray-200 backdrop-blur-xl flex flex-col items-center justify-center z-10 rounded-lg">
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 text-gray-500 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
-                      </svg>
-                      <p className="text-gray-600 text-sm font-medium mb-2">Image is hidden for safety</p>
-                      <button 
-                        onClick={() => setBlurredImages(prev => ({...prev, [msg.id]: false}))}
-                        className="bg-blue-500 text-white px-3 py-1 rounded text-sm hover:bg-blue-600"
-                      >
-                        View Image
-                      </button>
-                      <p className="text-xs text-gray-500 mt-2 px-4 text-center">
-                        By viewing this image, you acknowledge that the platform is not responsible for its content
-                      </p>
-                    </div>
-                    <img 
-                      src={msg.imageUrl} 
-                      alt="Shared image (hidden)" 
-                      className="rounded-lg max-w-full max-h-60 object-contain invisible"
-                    />
-                  </div>
-                ) : (
-                  <img 
-                    src={msg.imageUrl} 
-                    alt="Shared image" 
-                    className="rounded-lg max-w-full max-h-60 object-contain cursor-pointer"
-                    onClick={() => window.open(msg.imageUrl, '_blank')}
-                    loading="lazy" // Add lazy loading for images
-                  />
-                )}
+                <img 
+                  src={msg.imageUrl} 
+                  alt="Shared image" 
+                  className="rounded-lg max-w-full max-h-60 object-contain cursor-pointer"
+                  onClick={() => window.open(msg.imageUrl, '_blank')}
+                  loading="lazy" // Add lazy loading for images
+                />
               </div>
             )}
             <div className="flex items-center justify-end mt-1 space-x-1">
@@ -1377,52 +1278,73 @@ const ChatPage = () => {
     const file = e.target.files[0];
     if (!file) return;
     
-    const maxSizeInMB = 5;
-    const maxSizeInBytes = maxSizeInMB * 1024 * 1024;
+    // Check if file is an image
+    if (!file.type.match('image.*')) {
+      toast.error('Only image files are supported');
+      return;
+    }
     
-    // Display image sharing safety warning
-    const hasShownImageWarning = localStorage.getItem('hasShownImageWarning');
-    if (!hasShownImageWarning) {
-      toast((t) => (
-        <div className="p-2">
-          <h3 className="font-bold text-red-600 mb-1">⚠️ Image Sharing Warning</h3>
-          <p className="text-sm mb-2">Before sharing images, please note:</p>
-          <ul className="text-xs list-disc pl-4 mb-2">
-            <li className="font-semibold">DO NOT share personal or explicit images</li>
-            <li>Images are not encrypted and may be viewed by others</li>
-            <li>This platform is NOT responsible for content shared by users</li>
-            <li>Sharing inappropriate content may result in account termination</li>
-          </ul>
-          <div className="text-right">
-            <button 
-              onClick={() => {
-                localStorage.setItem('hasShownImageWarning', 'true');
-                toast.dismiss(t.id);
-              }}
-              className="bg-blue-500 text-white px-2 py-1 rounded text-xs"
-            >
-              I understand
-            </button>
+    // Check file size (limit to 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error('Image size exceeds 5MB limit');
+      return;
+    }
+    
+    // Set the image file immediately so it can be processed
+    setImageFile(file);
+    
+    // Always show a safety warning when an image is selected
+    // Use a more prominent toast that stays visible longer
+    toast.custom(
+      (t) => (
+        <div className={`${
+          t.visible ? 'animate-enter' : 'animate-leave'
+        } max-w-md w-full bg-white shadow-lg rounded-lg pointer-events-auto flex ring-1 ring-black ring-opacity-5`}>
+          <div className="w-full p-4 border-l-4 border-yellow-500 bg-yellow-50">
+            <div className="flex items-start">
+              <div className="flex-shrink-0 pt-0.5">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <div className="ml-3 w-0 flex-1">
+                <h3 className="font-bold text-red-600 text-sm">⚠️ Image Safety Warning</h3>
+                <p className="mt-1 text-sm text-gray-800">For your safety when sharing images:</p>
+                <ul className="mt-1 text-xs list-disc pl-4 text-gray-800">
+                  <li className="font-bold text-red-600">DO NOT share personal photos or explicit content</li>
+                  <li>Remember you're chatting with someone you don't know in person</li>
+                  <li>Images are stored on servers and cannot be fully deleted</li>
+                  <li>Other users may download or screenshot your images</li>
+                </ul>
+                <div className="mt-2 flex">
+                  <button
+                    onClick={() => toast.dismiss(t.id)}
+                    className="inline-flex items-center px-2 py-1 border border-transparent text-xs font-medium rounded text-indigo-700 bg-indigo-100 hover:bg-indigo-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                  >
+                    I understand
+                  </button>
+                </div>
+              </div>
+              <div className="ml-4 flex-shrink-0 flex">
+                <button
+                  onClick={() => toast.dismiss(t.id)}
+                  className="bg-white rounded-md inline-flex text-gray-400 hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                >
+                  <span className="sr-only">Close</span>
+                  <svg className="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                  </svg>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
-      ), { duration: 10000 });
-    }
+      ),
+      { duration: 8000, position: 'top-center' }
+    );
     
-    // Check file type and size
-    if (file.type.startsWith('image/')) {
-      if (file.size > maxSizeInBytes) {
-        toast.error(`File size exceeds ${maxSizeInMB}MB limit. Please choose a smaller file.`);
-        return;
-      }
-      
-      // For images under the size limit, proceed normally
-      setImageFile(file);
-    } else {
-      toast.error('Please select an image file (JPEG, PNG, GIF)');
-    }
-    
-    // Reset the file input value to allow selecting the same file again
-    e.target.value = '';
+    // Also log to the console for debugging
+    console.log('Image selected:', file.name, 'Warning toast should be shown');
   };
   
   // Capture image from camera (for mobile)
@@ -1596,33 +1518,55 @@ const ChatPage = () => {
   
   // Start a video call with the selected user
   const startVideoCall = () => {
-    if (!selectedUser?.online) {
-      toast.error("Cannot start a call with offline user!");
-      return;
-    }
-    
-    // Show safety disclaimer for video calls
-    showSafetyDisclaimer('video');
-    
-    // Play outgoing call sound
-    const audio = new Audio('/sounds/outgoing-call.mp3');
-    if (notificationSound) {
-      audio.loop = true;
-      audio.play().catch(err => console.error("Error playing sound:", err));
-      // Store audio reference to stop it later
-      ringToneRef.current = audio;
-    }
-    
-    // Notify the server we're calling this user
-    socket.emit('start-call', {
-      from: userData.userName,
-      to: selectedUser.userName,
-      callType: 'video'
-    });
-    
-    // Show outgoing call UI
-    setOutgoingCall(true);
-    setShowVideoCall(true);
+    // Add a safety warning before initiating the call
+    toast((t) => (
+      <div className="p-3 bg-yellow-50 border-l-4 border-yellow-500">
+        <h3 className="font-bold text-red-600 mb-1">⚠️ Video Call Safety Notice</h3>
+        <p className="text-sm mb-2">You are about to start a video call:</p>
+        <ul className="text-xs list-disc pl-4 mb-2">
+          <li className="font-bold text-red-600">DO NOT share sensitive personal information</li>
+          <li className="font-bold text-red-600">DO NOT engage in explicit content during calls</li>
+          <li>Remember you're talking to someone you don't know in person</li>
+          <li>You can end the call at any time if you feel uncomfortable</li>
+        </ul>
+        <div className="flex justify-end gap-2 mt-2">
+          <button 
+            onClick={() => toast.dismiss(t.id)}
+            className="bg-gray-200 text-gray-800 px-2 py-1 rounded text-xs"
+          >
+            Cancel
+          </button>
+          <button 
+            onClick={() => {
+              toast.dismiss(t.id);
+              
+              // Original call code
+              const audio = new Audio('/sounds/outgoing-call.mp3');
+              if (notificationSound) {
+                audio.loop = true;
+                audio.play().catch(err => console.error("Error playing sound:", err));
+                // Store audio reference to stop it later
+                ringToneRef.current = audio;
+              }
+              
+              // Notify the server we're calling this user
+              socket.emit('start-call', {
+                from: userData.userName,
+                to: selectedUser.userName,
+                callType: 'video'
+              });
+              
+              // Show outgoing call UI
+              setOutgoingCall(true);
+              setShowVideoCall(true);
+            }}
+            className="bg-blue-500 text-white px-2 py-1 rounded text-xs"
+          >
+            I Understand
+          </button>
+        </div>
+      </div>
+    ), { duration: 7000 });
   };
   
   // Close the video call UI

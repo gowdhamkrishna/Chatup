@@ -1,5 +1,6 @@
-
 import "./globals.css";
+import { Toaster } from "react-hot-toast";
+
 export const metadata = {
   title: "Chatup",
   description: "Chat Application",
@@ -13,7 +14,7 @@ export default function RootLayout({ children }) {
        
       >
         <PingProvider/>
- 
+        <Toaster position="top-center" />
         {children}
       </body>
     </html>
