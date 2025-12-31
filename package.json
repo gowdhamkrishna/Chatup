@@ -16,26 +16,33 @@
     "cors": "^2.8.5",
     "emoji-picker-react": "^4.12.2",
     "express": "^5.1.0",
+    "express-mongo-sanitize": "^2.2.0",
+    "express-rate-limit": "^8.2.1",
+    "file-type": "^21.2.0",
+    "helmet": "^8.1.0",
     "lucide-react": "^0.487.0",
     "mongoose": "^8.13.2",
     "multer": "^1.4.5-lts.2",
     "next": "15.2.4",
-    "peerjs": "^1.5.4",
     "prop-types": "^15.8.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-hot-toast": "^2.5.2",
     "react-icons": "^5.5.0",
-    "react-toastify": "^11.0.5",
     "simple-peer": "^9.11.1",
     "socket.io": "^4.8.1",
-    "socket.io-client": "^4.8.1",
-    "socketio": "^1.0.0"
+    "xss": "^1.0.15"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "concurrently": "^8.2.2",
+    "eslint": "9.39.2",
+    "eslint-config-next": "16.1.1",
+    "jest": "^30.2.0",
+    "mongodb-memory-server": "^11.0.1",
     "nodemon": "^3.0.1",
+    "socket.io-client": "^4.8.3",
+    "supertest": "^7.1.4",
     "tailwindcss": "^4"
   }
 }

@@ -4,6 +4,9 @@ import { Toaster } from "react-hot-toast";
 export const metadata = {
   title: "Chatup",
   description: "Chat Application",
+  icons: {
+    icon: '/image.png',
+  },
 };
 
 import PingProvider from "./ping";
@@ -11,9 +14,9 @@ export default function RootLayout({ children }) {
   return (
     <html lang="en">
       <body
-       
+
       >
-        <PingProvider/>
+        <PingProvider />
         <Toaster position="top-center" />
         {children}
       </body>

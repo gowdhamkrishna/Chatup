@@ -1,6 +1,6 @@
 "use client";
 import { useEffect } from "react";
-import socket from "@/sockClient";
+import socket from "@/app/lib/sockClient";
 
 export default function PingProvider() {
   useEffect(() => {
@@ -16,12 +16,12 @@ export default function PingProvider() {
         if (socket.connected) {
           socket.emit("ping-user", formData.userName);
         }
-      }, 10000); 
+      }, 10000);
 
 
       return () => {
         clearInterval(interval);
-   
+
         // socket.emit("disconnect-user", formData.userName);
       };
     } catch (error) {

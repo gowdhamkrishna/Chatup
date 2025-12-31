@@ -2,6 +2,7 @@
 
 # Kill any existing node processes running the server
 pkill -f "node server.js" || echo "No server running"
+sleep 1
 
 # Clean up any problematic socket files
 rm -f /tmp/vscode-typescript*/*/tscancellation-*.tmp* 2>/dev/null || true
@@ -18,4 +19,4 @@ NODE_ENV=production node \
 sleep 2
 
 # Start the Next.js client
-cd ~/chatib/chat && npm run dev 
+cd "$(dirname "$0")" && npm run dev 

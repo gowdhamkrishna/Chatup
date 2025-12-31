@@ -8,16 +8,16 @@ export const checkUser = async (formData) => {
   try {
     await connectFunction();
 
-    let res = await User.findOne({ userName: formData.userName});
-    
+    let res = await User.findOne({ userName: formData.userName });
+
     if (res) {
-      return true;  
+      return true;
     } else {
-      return false; 
+      return false;
     }
   } catch (err) {
     console.error("Error checking user:", err);
-    throw err;  
+    throw err;
   }
 };
 
@@ -28,7 +28,7 @@ export const saveUser = async (formData) => {
     await connectFunction()
     const user = new User(formData);
     await user.save();  // Save the new user instance to the database
-    return user;        
+    return user;
   } catch (err) {
     console.error("Error adding user:", err);
     throw err;  // Rethrow the error to be handled at a higher level
@@ -43,15 +43,23 @@ export const getUsers = async (details) => {
     await connectFunction()
     const users = await User.find({
       userName: { $ne: details.userName },
-      
     }, { lastSeen: 0 })
       .lean()
       .exec();
 
-    const formattedUsers = users.map(user => ({
-      ...user,
-      _id: user._id.toString(),
-    }));
+    const formattedUsers = users.map(user => {
+      // Filter chatWindow to only include messages involving the requesting user
+      // This prevents User C from seeing messages between A and B
+      const filteredChatWindow = user.chatWindow ? user.chatWindow.filter(msg =>
+        msg.user === details.userName || msg.to === details.userName
+      ) : [];
+
+      return {
+        ...user,
+        _id: user._id.toString(),
+        chatWindow: filteredChatWindow
+      };
+    });
 
     return formattedUsers;
   } catch (error) {
